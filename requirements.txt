@@ -1,0 +1,9 @@
+# Runtime dependencies for Hugging Face Spaces (Streamlit SDK) on CPU hardware.
+# On a GPU Space, delete the first line so pip installs the default (CUDA) torch wheel.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.5
+numpy>=1.26
+scipy>=1.11
+scikit-learn>=1.3
+streamlit>=1.37
+plotly>=5.18

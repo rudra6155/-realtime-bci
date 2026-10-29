@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "realtime-bci"
+version = "0.1.0"
+description = "Real-time, GPU-accelerated EEG decoding pipeline (synthetic data): ring buffer -> pinned memory -> CUDA streams -> Riemannian/LDA classifier -> live dashboard"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "scikit-learn>=1.3",
+    # On Windows the default PyPI wheel is CPU-only; install a CUDA build first (see README).
+    "torch>=2.5",
+    "onnx>=1.16",
+    "onnxruntime-gpu>=1.18",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "streamlit>=1.37",
+    "plotly>=5.18",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "playwright>=1.44",
+    "httpx>=0.27",
+    "pillow>=10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "gpu: needs a CUDA device (skipped without one unless BCI_REQUIRE_CUDA=1, then it fails)",
+]
