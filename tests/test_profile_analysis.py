@@ -76,3 +76,18 @@ def test_timeline_png_is_written(prof, tmp_path):
 def test_profile_script_does_not_shadow_stdlib_profile(prof):
     import profile as stdlib_profile            # noqa: F401 - would be our script if the guard failed
     assert not hasattr(stdlib_profile, "load_gpu_events")
+
+
+def test_from_trace_mode_redraws_without_a_gpu(prof, tmp_path, capsys):
+    trace = _trace(tmp_path)
+    rc = prof.main(["--from-trace", str(trace), "--out-dir", str(tmp_path / "out")])
+    assert rc == 0 and (tmp_path / "out" / "profiler_overlap.png").stat().st_size > 5_000
+    assert "h2d_overlapped_with_kernels_us" in capsys.readouterr().out
+
+
+def test_zoom_focuses_on_the_overlapping_copy(prof, tmp_path):
+    events = prof.load_gpu_events(_trace(tmp_path))
+    focus = prof._focus_h2d(events)
+    assert (focus["start"], focus["end"]) == (150.0, 180.0)          # the copy inside kernel [100, 200]
+    no_overlap = prof.load_gpu_events(_trace(tmp_path, h2d_starts=(210, 450, 750, 1050)))
+    assert prof._focus_h2d(no_overlap)["start"] in (450.0, 750.0)    # falls back to a middle copy

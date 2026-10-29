@@ -15,7 +15,8 @@ dependencies = [
     # On Windows the default PyPI wheel is CPU-only; install a CUDA build first (see README).
     "torch>=2.5",
     "onnx>=1.16",
-    "onnxruntime-gpu>=1.18",
+    # 1.21-1.26 are built for CUDA 12.8 (cuDNN 9); 1.27+ default to CUDA 13 and fail to load next to a CUDA 12.x torch.
+    "onnxruntime-gpu>=1.21,<1.27",
     "fastapi>=0.110",
     "uvicorn>=0.27",
     "streamlit>=1.37",

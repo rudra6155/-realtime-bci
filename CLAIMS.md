@@ -1,63 +1,86 @@
 # CLAIMS — anti-hallucination ledger
 
-One row per claim. **VERIFIED** = a command was run in this repo and the observed output is
-quoted. **PENDING-GPU** = needs the RTX 4060; not run; no number is given. **UNVERIFIED** = written
-but not executed anywhere.
+One row per claim. **VERIFIED** = a command was run and the observed output is cited.
+**UNVERIFIED** = written but not executed anywhere. **OPEN** = a question the data raised that
+nobody has answered. Every latency number points to `results/benchmark_latency*.csv` and
+`results/benchmark_summary.csv`; the summary was independently recomputed from the raw per-chunk
+files (identical to < 1e-6 ms).
 
-Authoring environment: Linux container, 4 vCPU, **no NVIDIA GPU**, torch 2.15.0+cpu, Python 3.13.
-"CPU" below means torch on the CPU device unless stated. All data are synthetic.
+Two environments, named in every row where it matters:
+* **GPU machine**: RTX 4060 Laptop GPU, Windows, Python 3.13.5, torch 2.10.0+cu128, triton-windows
+  3.6.0, onnxruntime-gpu 1.26.0 (console logs `gpu_*.txt` in the repo root are UTF-16).
+* **Container**: Linux, 4 vCPU, no GPU, torch 2.15.0+cpu.
 
-**Every latency number must point to `results/benchmark_latency.csv`. That file does not exist
-yet** (it is written by `make benchmark` on a CUDA machine), so there is **no VERIFIED GPU latency
-claim in this ledger**.
+All data are synthetic.
 
-## A. Verified here (CPU / no GPU needed)
+## A. GPU machine (RTX 4060)
 
 | # | Claim | Status | Evidence |
 |---|---|---|---|
-| A1 | Ring buffer: 10.24 s of data (40 chunks) at 1× real time → 0 dropped samples, 0 overrun events, ≥ 2 wraps, data bit-identical to an unpaced regeneration of the same stream | VERIFIED | `pytest tests/test_ring_buffer.py -s` → `{'samples_written': 2560, 'wrap_count': 2, 'dropped_samples': 0, 'overrun_events': 0, 'write_calls': 40, 'write_us_mean': 85.26, 'write_us_max': 197.75, ...}`, 4 passed |
-| A2 | Ring buffer wrap-around keeps order/data; `latest()` correct after wrap; buffer array is pre-allocated and never replaced | VERIFIED | same command (`test_wrap_around_preserves_order_and_data`, `test_latest_window_after_wrap`) |
-| A3 | Overrun drops the oldest chunk(s), counts them (320 of 1280 samples in the test) and logs a warning; the newest data survive | VERIFIED | same command (`test_overrun_drops_oldest_chunk_and_warns`) |
-| A4 | torch-on-CPU matches scipy/numpy float64 within `atol=1e-4` on 10 windows (max abs diff: band-pass 1.17e-5, covariance 1.33e-7, tangent features 1.40e-7, LDA scores 7.77e-7) | VERIFIED (CPU device only) | `pytest tests/test_correctness.py -s -k "cpu"` prints `[bandpass] max |cpu-gpu| = 1.174e-05 …` etc. |
-| A5 | Whole streaming path (ring buffer → staging → pipeline → scores) on the CPU device matches the scipy reference: max abs diff 1.08e-6 over 23 chunks, with and without look-ahead; 0 dropped samples | VERIFIED (CPU device only) | `test_streaming_pipeline_matches_cpu_reference[cpu]` |
-| A6 | ONNX: the exported LDA head run in onnxruntime (`CPUExecutionProvider`) matches the PyTorch head: max abs diff 8.66e-15 | VERIFIED (CPU provider only) | `pytest tests/test_correctness.py -s -k onnx` → `onnxruntime providers: ['CPUExecutionProvider']`, `[ONNX vs PyTorch head] max |cpu-gpu| = 8.660e-15` |
-| A7 | Held-out accuracy of the classifier on **synthetic** data: 0.865 (n = 200, seed 1234; trained on seed 0) | VERIFIED (synthetic only; says nothing about real EEG) | `pytest tests/test_correctness.py -s -k accuracy` → `HELD-OUT ACCURACY (synthetic, n=200, seed=1234): 0.865` |
-| A8 | The full model cannot be exported with the legacy ONNX exporter: `aten::linalg_eigh` unsupported. The `torch.export`-based exporter was not evaluated (needs `onnxscript`) | VERIFIED | `UnsupportedOperatorError: Exporting the operator 'aten::linalg_eigh' to ONNX opset version 17 is not supported` (command in FINDINGS §4.4) |
-| A9 | `torch.compile` works for the filter on this CPU (compile ≈ 3 s, output within 1.03e-5 of scipy); when compilation raises, the filter falls back to eager and reports `compiled=False` | VERIFIED (CPU only) | `test_torch_compile_filter_matches_eager[cpu]`, `test_compile_failure_falls_back_to_eager_and_says_so` |
-| A10 | Hot-path source contains no `.item`, `.cuda`, `.cpu`, `.tolist` or `print`; stages and model code contain no Python loops/comprehensions (no per-channel loop); `stage`/`launch` use `non_blocking` copies | VERIFIED (static source check; the guard demonstrably fires: it flagged my own attribute `self.cuda`, which I renamed). It cannot see implicit syncs inside library calls (see A11) | `pytest tests/test_latency.py -k "hot_path or async or loop"` |
-| A11 | `torch.linalg.eigh` synchronizes the host on CUDA (documented); there is no `eigh_ex` | VERIFIED (documentation text of the installed torch; the behaviour itself was not measured on a GPU) | `torch.linalg.eigh.__doc__` → "When inputs are on a CUDA device, this function synchronizes that device with the CPU."; `hasattr(torch.linalg,'eigh_ex')` → False |
-| A12 | PyTorch 2.15.0 defaults: `torch.backends.cudnn.allow_tf32 = True`, `torch.backends.cuda.matmul.allow_tf32 = False`; the code disables both | VERIFIED (default values read from the installed CPU build; the code path `configure_precision()` is exercised by every pipeline test) | `python -c "import torch;print(torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)"` → `True False` |
-| A13 | Dashboard renders headlessly in Chromium without Streamlit exceptions or browser page errors, shows a class heading, a Plotly gauge and EEG plot, and is live (chunk counter increases over 3 s). Ran on CPU | VERIFIED (CPU) | `pytest tests/test_dashboard.py` → passed |
-| A14 | FastAPI endpoints (`/health`, `/stats`, `/ws`) work with a stub engine; the real `ProcessEngine` runs the pipeline in a child process on CPU and publishes ≥ 15 chunks with 0 dropped samples | VERIFIED (CPU) | `pytest tests/test_server.py` → 2 passed |
-| A15 | Running a figure-building thread in the same process as the pipeline raised paced p99 from 10.3–13.8 ms to 26.9–45.6 ms in 3 of 4 repetitions (one alone-run had its own 38.5 ms outlier); p50 unchanged (~5.2–6.1 ms). ~58 chunks per condition | VERIFIED (CPU, noisy, small n) | `python scripts/ui_contention.py --device cpu` ×4; table in FINDINGS §4.1 |
-| A16 | The benchmark harness runs all three run types on CPU; `paced` wall time per chunk 256.1 ms (pacing works); `make benchmark` and the CLI **refuse** to write GPU artifacts on a CPU machine (exit 2, nothing written to `results/`); `--allow-cpu` output is prefixed `cpu_smoke_` | VERIFIED | `python -m bci.gpu_pipeline benchmark --device cpu --allow-cpu --chunks 100 --warmup 10 --runs overlap,baseline,paced`; `make benchmark` → `ERROR: no CUDA device. Refusing …`, exit 2; `pytest tests/test_latency.py -k cli` |
-| A17 | Profiler-analysis arithmetic (interval overlap, classification of memcpy/kernel events, PNG generation) is correct on a hand-built trace | VERIFIED for the **arithmetic only**; that a real torch.profiler trace uses the assumed field names is UNVERIFIED (see C3) | `pytest tests/test_profile_analysis.py` → 5 passed |
-| A18 | Full suite with CUDA absent: `make test REQUIRE_CUDA=0` → **40 passed, 9 skipped** (all 9 skips are CUDA-only cases, each printing the reason). Under `REQUIRE_CUDA=1` those 9 **fail** instead of skipping (2 failed + 7 errors in the deselect-run: dashboard/server excluded) | VERIFIED | `make test PYTHON=… REQUIRE_CUDA=0` → `40 passed, 9 skipped, 1 warning in 68.76s`; strict run → `2 failed, 37 passed, 3 deselected, 1 warning, 7 errors` |
-| A19 | README GIF exists and shows the dashboard decoding in real time **on a CPU** (page says `Device: CPU`, latency in the GIF is CPU latency) | VERIFIED as a CPU recording | `results/dashboard_demo.gif` (38 frames, 4.3 MB), `python scripts/record_gif.py` |
+| G1 | **p99 end-to-end latency < 50 ms.** Real-time paced run (1 chunk / 256 ms, 1000 chunks after 50 warm-up): **p99 23.417 ms** (p50 18.611, p90 20.653, max 26.967). Back-to-back `overlap`: p99 11.215 ms. `baseline`: p99 5.186 ms | VERIFIED | `results/benchmark_summary.csv` (rows `paced`/`overlap`/`baseline`, metric `e2e`); raw `results/benchmark_latency_paced.csv`, `benchmark_latency.csv`, `benchmark_latency_baseline.csv` (1000 rows each); console `gpu_benchmark2.txt` |
+| G2 | Per-stage p50/p90/p99 (h2d, filter, cov, classifier, d2h) for all three runs, e.g. `overlap` classifier 2.951 / 3.312 / 4.150 ms; `paced` classifier 16.194 / 16.677 / 20.831 ms | VERIFIED | same summary CSV; table in FINDINGS §2. `cov` includes the whitening matmuls (changed when the launch was split) |
+| G3 | `results/latency_histogram.png` exists and shows the `overlap` run (n = 1000, p50 7.84, p99 11.22 ms) | VERIFIED | file viewed |
+| G4 | Two CUDA streams and pinned staging buffers are used | VERIFIED | `test_two_streams_and_pinned_buffers` passed (`gpu_pytest_full2.txt`); trace shows streams 29 (copy: H2D + score D2H) and 33 (compute) |
+| G5 | **Copy/compute overlap exists but is tiny.** 7.328 µs of 457.996 µs of H2D time (1.6%) ran concurrently with kernels; D2H 0 µs. Before the launch was split at `eigh`: 0.0 µs | VERIFIED | `results/profiler_overlap.csv`; `gpu_profile.txt` (before) vs `gpu_profile2.txt` (after); figure `results/profiler_overlap.png`; trace `results/profiler_trace.json` |
+| G6 | **The overlap design did not reduce latency.** `overlap` e2e p50 7.838 vs `baseline` 3.857 ms (+3.98 ms); wall per chunk 4.004 vs 3.953 ms (+0.05 ms). There is no "X ms saved" | VERIFIED | `results/benchmark_summary.csv` (`wall_ms_per_chunk` column) |
+| G7 | CUDA output matches the scipy float64 reference within `atol=1e-4`: band-pass 1.17e-5, covariance 1.32e-7, tangent features 1.41e-7, LDA scores 7.24e-7, whole streaming path 1.06e-6 (with and without look-ahead) | VERIFIED | `gpu_pytest2.txt` (`-s` output of the `[cuda]` tests); `gpu_pytest_full2.txt` 54 passed |
+| G8 | ONNX: with `onnxruntime-gpu 1.26.0` the session lists `CUDAExecutionProvider` and the exported LDA head matches the PyTorch head (max diff 2.84e-14) | VERIFIED for provider availability and numeric match. Whether the float64 Gemm node actually runs on the CUDA provider (vs CPU fallback) was **not checked** | `gpu_pytest2.txt`: `onnxruntime providers: ['CUDAExecutionProvider', 'CPUExecutionProvider']` |
+| G9 | `torch.compile` works for the filter on the GPU (Triton present): `filter_compiled=True`, matches scipy to 1.03e-5, two Triton kernels per chunk in the trace. It gives **no measurable latency benefit** (filter p50 0.312 compiled vs 0.282 ms eager; noise ~10%) | VERIFIED | `results/benchmark_summary.csv` (`filter_compiled`), `gpu_run/nocompile_after/benchmark_summary.csv`, `gpu_pytest2.txt`, trace |
+| G10 | float64 `eigh` per chunk fits the budget: classifier stage p99 4.150 ms back-to-back, 20.831 ms paced (total paced p99 23.417 ms) | VERIFIED | summary CSV |
+| G11 | Where the time goes: per chunk 183 kernels / ~1,794 µs kernel time, 90% of it in cuSOLVER eigensolver kernels (one `sytrd` kernel = 782 µs); extra device-to-host copies on the compute stream consistent with the documented `eigh` host sync | VERIFIED (kernel/copy counts from the trace). That the extra copies come from `eigh` is an inference, not traced to a call | `results/profiler_trace.json`; `python scripts/profile.py --from-trace results/profiler_trace.json` |
+| G12 | Dashboard on the GPU shows the GPU device and a live paced p99 of 23.87 ms (114 chunks) | VERIFIED | `results/dashboard_demo.gif` (last frame: "Device: NVIDIA GeForce RTX 4060 Laptop GPU (cuda: 2 streams, pinned, async) \| filter: torch.compile"); `test_dashboard_renders_and_updates` passed on this machine |
+| G13 | Full test suite on the GPU machine: **54 passed, 1 skipped** (CPU `torch.compile` test: no C++ compiler on `PATH`) with `BCI_REQUIRE_CUDA=1` | VERIFIED | `gpu_pytest_full2.txt` |
+| G14 | The look-ahead stage/launch/collect ordering and event-based slot reuse work on real CUDA streams: streaming test matches the CPU reference over 23 chunks; the 1000-chunk `overlap` run in `test_p99_latency_under_50ms` asserts 0 ring-buffer drops; all three 1000-chunk benchmark runs completed without error | VERIFIED functionally. **No race detector** (e.g. `compute-sanitizer`) was run | `gpu_pytest_full2.txt`, benchmark logs |
+| G15 | `pip install -e ".[dev]"` and `playwright install chromium` work on Windows / Python 3.13.5 | VERIFIED (console output pasted by the user in chat; not a committed file) | — |
+| G16 | Dependency pairing: ONNX Runtime ≥ 1.27 ships a CUDA 13 build; with a CUDA 12.x torch the provider fails to load (`cublasLt64_13.dll` missing). Pairing torch 2.10.0+cu128, triton-windows 3.6.0 and onnxruntime-gpu 1.26.0 works | VERIFIED | failure in `gpu_pytest.txt`, pass in `gpu_pytest2.txt`; onnxruntime CUDA docs (version table) |
+| G17 | `scripts/profile.py` works end to end on a real Kineto trace (event categories `kernel`/`gpu_memcpy`, `args.stream`, "HtoD" names matched) | VERIFIED | `gpu_profile2.txt`, `results/profiler_overlap.csv` |
 
-## B. Pending — requires the RTX 4060 (no number is claimed)
+## B. Container (no GPU)
 
-| # | Claim | Status | How it gets verified |
+| # | Claim | Status | Evidence |
 |---|---|---|---|
-| B1 | p99 end-to-end latency < 50 ms (chunk received → label ready) | PENDING-GPU | `make benchmark` → `results/benchmark_latency.csv`, `results/benchmark_summary.csv` (run `overlap`, metric `e2e`); `make test` (`test_p99_latency_under_50ms`) |
-| B2 | p50 / p90 / p99 per stage (h2d, filter, cov, classifier, d2h) | PENDING-GPU | `results/benchmark_summary.csv`; fills the table in FINDINGS §2 |
-| B3 | `latency_histogram.png` | PENDING-GPU | written by `make benchmark` |
-| B4 | Two CUDA streams + pinned buffers are actually used | PENDING-GPU | `test_two_streams_and_pinned_buffers` |
-| B5 | Copy/compute overlap, and X ms saved vs the single-stream baseline | PENDING-GPU | `make profile` (`results/profiler_overlap.csv`, `.png`, `profiler_trace.json`) and `overlap` vs `baseline` rows of the summary |
-| B6 | GPU output matches CPU within `atol=1e-4` (filter, covariance, tangent features, scores, whole pipeline) | PENDING-GPU | the `[cuda]` cases of `tests/test_correctness.py` (skipped here) |
-| B7 | ONNX Runtime with `CUDAExecutionProvider` matches the PyTorch GPU path | PENDING-GPU | `test_onnx_head_matches_pytorch[cuda]` (fails if the CUDA provider is missing) |
-| B8 | `torch.compile` works on CUDA on the target machine (needs Triton; fallback to eager is recorded in the CSV as `filter_compiled`) | PENDING-GPU | `filter_compiled` column of the summary; `test_torch_compile_filter_matches_eager[cuda]` |
-| B9 | float64 `eigh` per chunk fits the latency budget on this GPU | PENDING-GPU (open risk) | `classifier` rows of the summary |
-| B10 | Dashboard on the GPU shows GPU latency | PENDING-GPU | `make dashboard`, then `make gif` |
+| A1 | Ring buffer: 10.24 s (40 chunks) at 1× real time → 0 dropped samples, 0 overrun events, ≥ 2 wraps, data bit-identical to an unpaced regeneration; wrap-around and `latest()` correct; overrun drops the oldest chunk(s) and logs a warning | VERIFIED (also passes on the GPU machine) | `pytest tests/test_ring_buffer.py -s` → `{'samples_written': 2560, 'wrap_count': 2, 'dropped_samples': 0, 'overrun_events': 0, ...}` (timing fields vary per run) |
+| A2 | torch-on-CPU matches scipy float64 within `atol=1e-4` (max: band-pass 1.17e-5, covariance 1.33e-7, tangent 1.40e-7, scores 7.77e-7) and the whole streaming path matches (1.08e-6) | VERIFIED (CPU device) | `pytest tests/test_correctness.py -s -k cpu` |
+| A3 | Held-out accuracy of the classifier on **synthetic** data: 0.865 (n = 200, seed 1234; trained on seed 0) | VERIFIED (synthetic only; says nothing about real EEG) | `pytest tests/test_correctness.py -s -k accuracy` → `HELD-OUT ACCURACY (synthetic, n=200, seed=1234): 0.865` |
+| A4 | The full model cannot be exported with the legacy ONNX exporter: `aten::linalg_eigh` unsupported. The `torch.export`-based exporter was not evaluated (needs `onnxscript`) | VERIFIED | `UnsupportedOperatorError: Exporting the operator 'aten::linalg_eigh' to ONNX opset version 17 is not supported` (container, torch 2.15.0+cpu) |
+| A5 | `torch.compile` fallback: when compilation raises, the filter falls back to eager and reports `compiled=False` | VERIFIED | `test_compile_failure_falls_back_to_eager_and_says_so` |
+| A6 | Hot-path source has no `.item/.cuda/.cpu/.tolist/print`; vectorized stages have no Python loops/comprehensions; `stage`/`launch_post` use `non_blocking` copies | VERIFIED (static check; cannot see implicit syncs inside library calls, see G11) | `pytest tests/test_latency.py -k "hot_path or async or loop"` (also passed on the GPU machine) |
+| A7 | `torch.linalg.eigh` synchronizes the host on CUDA (documented); no `eigh_ex` | VERIFIED (documentation text of torch 2.15.0; consistent with G11) | `torch.linalg.eigh.__doc__` |
+| A8 | PyTorch 2.15.0 flag defaults: `cudnn.allow_tf32 = True`, `cuda.matmul.allow_tf32 = False`; the code disables both | VERIFIED (defaults read from the CPU build) | `python -c "import torch;print(torch.backends.cudnn.allow_tf32, torch.backends.cuda.matmul.allow_tf32)"` → `True False` |
+| A9 | Running a figure-building thread in the pipeline's process raised paced p99 from 10.3–13.8 ms to 26.9–45.6 ms in 3 of 4 CPU repetitions (one alone-run had its own 38.5 ms outlier); p50 unchanged. ~58 chunks per condition | VERIFIED (CPU, noisy, small n) | `python scripts/ui_contention.py --device cpu` ×4; FINDINGS §4.1 |
+| A10 | The benchmark CLI **refuses** to write GPU artifacts on a CPU machine (exit 2) and prefixes `--allow-cpu` output with `cpu_smoke_` | VERIFIED | `make benchmark` in the container; `pytest tests/test_latency.py -k cli` |
+| A11 | Profiler-analysis arithmetic and the two-panel figure are correct on a hand-built trace; `--from-trace` redraws from a saved trace without a GPU; the script does not shadow stdlib `profile` | VERIFIED | `pytest tests/test_profile_analysis.py` |
+| A12 | FastAPI endpoints work with a stub engine; the real `ProcessEngine` runs the pipeline in a child process on CPU (and on the GPU machine) | VERIFIED | `pytest tests/test_server.py` |
+| A13 | The dashboard renders headlessly in Chromium with no Streamlit exceptions or page errors and is live (chunk counter increases) | VERIFIED (container on CPU; GPU machine: G12/G13) | `pytest tests/test_dashboard.py` |
+| A14 | `make test REQUIRE_CUDA=0` in the container on the final code: **48 passed, 9 skipped** (all 9 skips are CUDA-only cases, each printing the reason; with `BCI_REQUIRE_CUDA=1` they fail instead) | VERIFIED | `make test PYTHON=... REQUIRE_CUDA=0` → `48 passed, 9 skipped, 1 warning in 81.29s` |
 
-## C. Written but never executed
+## C. Still unverified or open
 
-| # | Claim | Status | Note |
+| # | Item | Status | Note |
 |---|---|---|---|
-| C1 | `Dockerfile` / `docker-compose.yml` build and run (GPU reservation) | UNVERIFIED | no Docker daemon in the authoring container |
+| C1 | `Dockerfile` / `docker-compose.yml` build and run (GPU reservation) | UNVERIFIED | no Docker daemon in the container; not run on the GPU machine either |
 | C2 | `.github/workflows/ci.yml` passes on GitHub | UNVERIFIED | never run |
-| C3 | `scripts/profile.py` works end to end and its parser matches real Kineto traces (`cat` = `kernel`/`gpu_memcpy`, `args.stream`, "HtoD" in the name) | UNVERIFIED | needs CUDA; it exits with an error rather than reporting zeros if no events match |
-| C4 | `make install` from a fresh clone | UNVERIFIED | not run (it downloads packages); dependencies were installed manually into a venv and `pip install -e . --no-deps` ran. `make test`, `make benchmark` (refusal) were run through the Makefile |
-| C5 | Hugging Face Spaces deployment (front-matter + `requirements.txt`) | UNVERIFIED | not deployed; the dashboard was run locally with `streamlit run app/dashboard.py` only |
-| C6 | Behaviour on native Windows (path with spaces, `make`/`bash` availability, Triton availability, CUDA wheel selection) | UNVERIFIED | authored and tested on Linux only |
-| C7 | The look-ahead stage/launch/collect ordering and event-based slot reuse are correct under real CUDA streams | UNVERIFIED on CUDA | the same code path was exercised on CPU only; stream/event calls (`wait_event`, `record`, `synchronize`, `elapsed_time`) were written from PyTorch API knowledge and never executed |
+| C3 | The `Makefile` targets and `scripts/run_benchmark.sh` on Windows | UNVERIFIED | the GPU run used the underlying `python -m ...` commands directly (PowerShell); `make test`/`make benchmark` themselves were run only in the container |
+| C4 | Hugging Face Spaces deployment (front-matter + `requirements.txt`) | UNVERIFIED | not deployed |
+| C5 | A Linux + NVIDIA GPU environment, or a CUDA 13 stack | UNVERIFIED | everything GPU-side ran on one Windows laptop with one stack |
+| C6 | **OPEN:** why the paced classifier stage is ~5.5× the back-to-back one (16.19 vs 2.95 ms p50) although the profiled kernels need ~1.8 ms | OPEN | candidates (not tested): clock ramp-up after idle gaps, WDDM scheduling; paced-run kernel durations were not profiled |
+| C7 | **OPEN:** why one pytest printout was 1.8× the CLI benchmark on the same stack (13.79 vs 7.7 ms p50, `gpu_pytest2.txt` vs `gpu_benchmark.txt`) | OPEN | candidates: other CUDA libraries loaded in the pytest process, background GPU load |
+| C8 | Alternatives to shrink the classifier stage (float32 `eigh`, a matmul-only matrix log, CUDA graphs for the non-`eigh` kernels) | UNVERIFIED | not tried; the 50 ms target is met without them |
+
+## Definition of done
+
+| Item | Status |
+|---|---|
+| `make test` green (latency < 50 ms and CPU/GPU correctness) | **Met on the GPU machine** with the equivalent `python -m pytest` and `BCI_REQUIRE_CUDA=1`: 54 passed, 1 skipped (G13). The `make` wrapper itself: C3 |
+| `benchmark_latency.csv` and `latency_histogram.png` committed | **Met** (G1–G3) |
+| Profiler trace showing stream overlap committed | **Met, with the honest finding that the overlap is 1.6% of a ~11 µs copy** (G5, G6) |
+| Dashboard runs and is ready for Hugging Face Spaces | Runs locally on CPU and GPU (A13, G12); the Spaces deployment itself is untested (C4) |
+| CLAIMS.md all VERIFIED | **Not literally**: C1–C5 are UNVERIFIED and C6–C8 are open, each stated above |
+
+## What the GPU machine has not run yet
+
+The GPU machine ran commit `07c4ee9` (55 tests: 54 passed, 1 skipped) and produced `results/`.
+Changed since, verified in the container only: `scripts/profile.py` (two-panel figure and
+`--from-trace`, regenerating `results/profiler_overlap.png` from the real trace), 2 new tests for
+it, `scripts/run_benchmark.sh` (paced run now on by default), the `pyproject.toml` pin
+`onnxruntime-gpu>=1.21,<1.27` (matches the stack already installed there), and the docs.

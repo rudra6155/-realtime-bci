@@ -7,7 +7,7 @@ pinned: false
 
 # realtime-bci
 
-A real-time, GPU-oriented EEG decoding pipeline on **synthetic** data: a simulated 64-channel
+A real-time, GPU-accelerated EEG decoding pipeline on **synthetic** data: a simulated 64-channel
 stream goes through a CPU ring buffer into pinned memory, then onto the GPU (two CUDA streams)
 for band-pass filtering, covariance, a Riemannian tangent-space map and an LDA classifier. A
 Streamlit dashboard shows the raw EEG, the predicted class and a live p99-latency gauge.
@@ -15,48 +15,81 @@ Streamlit dashboard shows the raw EEG, the predicted class and a live p99-latenc
 ## What this is / what this is NOT
 
 **This is** a streaming-systems demonstration: ring buffer, pinned-memory transfers, CUDA
-stream overlap, a vectorized `torch.compile`-able filter, CPU/GPU correctness tests, an ONNX
-parity check, and a latency benchmark that measures from "chunk received" to "label ready".
+streams, a `torch.compile`d vectorized filter, CPU/GPU correctness tests, an ONNX parity check,
+and a latency benchmark that measures from "chunk received" to "label ready".
 
 **This is not** a hardware-validated BCI. It has never seen a real EEG amplifier or a person.
-All data are synthetic, there is no artifact removal, and accuracy on this generator says
-nothing about accuracy on real EEG.
+All data are synthetic, there is no artifact removal, and accuracy on this generator (0.865
+held-out) says nothing about accuracy on real EEG.
 
-## Latency
+## Latency (measured)
 
-| | |
-|---|---|
-| Target | p99 < 50 ms, chunk received → label ready, on an RTX 4060 Laptop GPU |
-| **Measured p99 on the RTX 4060** | **Not measured yet.** This repo was written in a container with no GPU. Run `make benchmark`; the number is then in `results/benchmark_summary.csv` (headline run `overlap`, metric `e2e`) and every chunk is in `results/benchmark_latency.csv`. |
+**p99 = 23.4 ms** end to end, chunk received → label ready, at real-time rate (one 256 ms chunk
+every 256 ms), target < 50 ms. NVIDIA GeForce RTX 4060 Laptop GPU, Windows, torch 2.10.0+cu128,
+1000 measured chunks after 50 discarded warm-up chunks.
 
-Do not read any other number in this repo as the GPU latency. Numbers that exist today were
-measured on a CPU and are labelled as such in [FINDINGS.md](FINDINGS.md). Each claim and its
-verification status is listed in [CLAIMS.md](CLAIMS.md).
+| run (1000 chunks) | p50 | p90 | **p99** | max |
+|---|---|---|---|---|
+| `paced`: real-time rate, 2 streams, pinned | 18.61 ms | 20.65 ms | **23.42 ms** | 26.97 ms |
+| `overlap`: back-to-back, look-ahead | 7.84 ms | 8.76 ms | 11.22 ms | 14.18 ms |
+| `baseline`: back-to-back, 1 stream, blocking | 3.86 ms | 4.34 ms | 5.19 ms | 6.63 ms |
+
+Sources: `results/benchmark_summary.csv`, per-chunk raw data `results/benchmark_latency*.csv`,
+histogram `results/latency_histogram.png`. Stage breakdown, the profiler trace and everything that
+did not go as hoped are in [FINDINGS.md](FINDINGS.md); every claim and how it was verified is in
+[CLAIMS.md](CLAIMS.md).
+
+Two things to know before quoting these numbers:
+* The classifier stage (a float64 `eigh` plus its documented host sync) is ~75% of the compute
+  time. The CUDA stream overlap is real but tiny (7 µs of an 11 µs copy overlapped a kernel) and
+  **did not reduce latency**: the look-ahead variant is slower than the plain baseline.
+* Back-to-back runs flatter the pipeline; the paced run is the realistic one. Numbers come from one
+  laptop with other applications open and vary ~10% run to run.
 
 ## Dashboard
 
 ![dashboard demo](results/dashboard_demo.gif)
 
-*Recorded on a CPU-only machine (the page shows "Device: CPU"). Re-record on the GPU with
-`make gif`.* The decoder uses the latest 2 s of data, so its label trails a change of simulated
-intent by up to ~2 s.
+*Recorded on the RTX 4060 laptop: the page shows the device and a live rolling p99.* The decoder
+uses the latest 2 s of data, so its label trails a change of simulated intent by up to ~2 s.
 
 ## Quick start
 
-On a machine with an NVIDIA GPU, **first** install a CUDA build of PyTorch that matches your
-driver (selector: <https://pytorch.org/get-started/locally/>). The default PyPI wheel on Windows
-is CPU-only, in which case the GPU tests fail (by design) instead of silently skipping.
+On a machine with an NVIDIA GPU, **first** install a CUDA build of PyTorch (the default PyPI wheel
+on Windows is CPU-only; GPU tests then fail by design instead of silently skipping). The stack this
+repo was measured and tested on (Windows, Python 3.13):
+
+```powershell
+pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -e ".[dev]"
+pip install "triton-windows<3.7"     # lets torch.compile run on Windows; without it the filter falls back to eager
+python -m playwright install chromium
+```
+
+Keep CUDA builds matched: `onnxruntime-gpu` 1.27+ is built for CUDA 13 and cannot load next to a
+CUDA 12.x torch (`pyproject.toml` pins the 1.21–1.26 series, built for CUDA 12.8). `triton-windows`
+3.6 is the series the triton-windows docs pair with torch 2.10; I found no mapping for newer torch.
+On Linux, Triton ships with the CUDA torch wheels.
 
 ```bash
 make install     # pip install -e ".[dev]" + playwright chromium
 make test        # pytest; GPU tests FAIL (not skip) without CUDA. Use `make test REQUIRE_CUDA=0` on CPU.
-make benchmark   # 1000 measured chunks -> results/benchmark_latency.csv, benchmark_summary.csv, latency_histogram.png
+make benchmark   # overlap + baseline + paced runs, 1000 measured chunks each -> results/benchmark_*.csv, latency_histogram.png (~6 min; SKIP_PACED=1 omits the real-time run)
 make dashboard   # streamlit run app/dashboard.py
 make profile     # torch.profiler -> results/profiler_trace.json, profiler_overlap.png, profiler_overlap.csv
 ```
 
-`make` and `bash scripts/run_benchmark.sh` need a POSIX shell (Git Bash or WSL on Windows).
-`PACED=1 make benchmark` adds a 1× real-time run (about 4.3 minutes).
+`make` and `scripts/run_benchmark.sh` need a POSIX shell. On Windows PowerShell the same things are:
+
+```powershell
+$env:BCI_REQUIRE_CUDA = "1"; python -m pytest -v -rs
+python -m bci.gpu_pipeline benchmark --chunks 1000 --warmup 50 --runs overlap,baseline,paced --out-dir results
+python scripts\profile.py --out-dir results
+python -m streamlit run app\dashboard.py
+```
+
+The `paced` run takes about 4.5 minutes. Before benchmarking: plug in AC power and close other
+GPU-heavy applications.
 
 ## How it works
 
@@ -70,22 +103,22 @@ SyntheticEEGStream ──64×64 chunk──▶ RingBuffer (1000×64, O(1) writes
                                                                               label + scores in pinned memory ◀──┘
 ```
 
-* **Look-ahead overlap:** the host enqueues chunk *N-1*'s filter/covariance kernels, then
-  stages chunk *N* (pinned copy + async H2D), then runs *N-1*'s `eigh` + classifier. The copy for
-  *N* is issued while the GPU is busy with *N-1*. Slot reuse is guarded by CUDA events, not host
-  syncs. How much this buys is a measurement (see FINDINGS.md): the copy is only ~11 µs.
-* **Hot path has no `.item()`, `.cuda()`, `.cpu()`, `.tolist()` or `print`** — enforced by an AST
-  test. One host synchronization is unavoidable: `torch.linalg.eigh` on CUDA synchronizes with
-  the CPU (PyTorch documents it). It follows from choosing a Riemannian classifier.
+* **Look-ahead:** the host enqueues chunk *N-1*'s filter/covariance kernels, then stages chunk *N*
+  (pinned copy + async H2D), then runs *N-1*'s `eigh` + classifier. Slot reuse is guarded by CUDA
+  events, not host syncs. Measured effect: see above (none on latency).
+* **Hot path has no `.item()`, `.cuda()`, `.cpu()`, `.tolist()` or `print`**, enforced by an AST
+  test. One host synchronization is unavoidable: `torch.linalg.eigh` on CUDA synchronizes with the
+  CPU (PyTorch documents it). It follows from choosing a Riemannian classifier.
 * **Precision:** TF32 is disabled (PyTorch leaves cuDNN TF32 on by default); the filter runs in
-  float32, covariance/`eigh`/LDA in float64, to meet `atol=1e-4` against scipy.
+  float32, covariance/`eigh`/LDA in float64. CUDA output matches scipy float64 to ≤ 1.2e-5
+  (requirement 1e-4).
 * **Filter:** one `conv1d` over all 64 channels (channels folded into the batch axis).
   `torch.compile` is attempted on CUDA; if Triton or a compiler is missing it falls back to eager
-  and the result files say `filter_compiled=False`.
-* **Dashboard:** the pipeline runs in its own process so Streamlit's rendering cannot stall it
-  (see FINDINGS.md).
-* **ONNX:** the LDA head is exported and run in onnxruntime. The eigendecomposition step is not
-  exportable (`aten::linalg_eigh` unsupported), so the full model is not.
+  and the result files say `filter_compiled=False`. On the measured machine compiling it made no
+  measurable difference.
+* **Dashboard:** the pipeline runs in its own process so Streamlit's rendering cannot stall it.
+* **ONNX:** the LDA head is exported and run in onnxruntime (CUDA provider). The eigendecomposition
+  step is not exportable (`aten::linalg_eigh` unsupported), so the full model is not.
 
 Details and every decision: [SPEC.md](SPEC.md).
 
@@ -96,20 +129,19 @@ src/bci/    stream.py ring_buffer.py filters.py classifier.py gpu_pipeline.py se
 app/        dashboard.py            Streamlit UI (Hugging Face Spaces entry point)
 tests/      test_ring_buffer.py test_correctness.py test_latency.py test_dashboard.py test_server.py test_profile_analysis.py
 scripts/    run_benchmark.sh profile.py record_gif.py ui_contention.py
-results/    benchmark_latency.csv, benchmark_summary.csv, latency_histogram.png, profiler_* (written by make benchmark / make profile)
+results/    benchmark_*.csv, latency_histogram.png, profiler_*, dashboard_demo.gif   (from the GPU run)
+gpu_run/    extra GPU runs (eager-filter A/B);  gpu_*.txt in the root: console logs of the GPU runs (UTF-16)
 ```
 
 ## Deploy the dashboard to Hugging Face Spaces
 
-The front-matter at the top of this file declares a Streamlit Space with `app/dashboard.py` as
-the entry point; `requirements.txt` lists the runtime dependencies (CPU torch). Push the repo to
-a Space; no code changes are needed. A free CPU Space runs the same pipeline on CPU and says
+The front-matter at the top of this file declares a Streamlit Space with `app/dashboard.py` as the
+entry point; `requirements.txt` lists the runtime dependencies (CPU torch). Push the repo to a
+Space; no code changes are needed. A free CPU Space runs the same pipeline on CPU and says
 "Device: CPU" on the page. For a GPU Space delete the first line of `requirements.txt` (the CPU
-index). Not deployed from here; see CLAIMS.md.
+index). **Not deployed or tested on Spaces** (see CLAIMS.md C4).
 
 ## Limitations
 
-Synthetic data only; no artifact removal; the dashboard assumes an ideal network; the latency
-target is defined for an RTX 4060 Laptop GPU and is only a claim once `make benchmark` has run
-there. `overlap`/`baseline` benchmark runs keep the GPU busy (optimistic for clock state);
-the `paced` run is the realistic one.
+Synthetic data only; no artifact removal; the dashboard assumes an ideal network; one laptop and
+one software stack were measured; Docker, CI and Hugging Face deployment were never run.

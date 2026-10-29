@@ -111,7 +111,7 @@ to the summary.
 
 | Run | What it is | Used for |
 |---|---|---|
-| `overlap` (headline) | 1000 chunks back-to-back, copy/compute overlap on | p99 assertion, `benchmark_latency.csv`, histogram |
+| `overlap` | 1000 chunks back-to-back, copy/compute overlap on | p99 assertion, `benchmark_latency.csv`, histogram |
 | `baseline` | 1000 chunks back-to-back, single stream, synchronous pageable copy | the "overlap saved X ms" comparison |
 | `paced` | chunks arrive at 1× real time (256 ms apart), no look-ahead | the realistic streaming case (≈ 4.3 min for 1000 chunks) |
 
@@ -159,14 +159,18 @@ Every claim in `CLAIMS.md` has one of:
 default (`REQUIRE_CUDA ?= 1`) so a green `make test` on your machine means the GPU tests
 ran. Where CUDA is absent: `make test REQUIRE_CUDA=0` (CI does this).
 
-## 9. Authoring-environment limits (read before trusting any result)
+## 9. Environments (read before trusting any result)
 
-Written in a Linux container with **no NVIDIA GPU, no CUDA toolkit, CPU-only torch 2.15.0**.
-Therefore in this environment: CUDA streams, pinned-memory transfers, `torch.compile` on
-CUDA, CUDA events, `onnxruntime` CUDA provider, the profiler trace and every latency
-number were **not executed**. They are written to the spec and marked PENDING-GPU or
-UNVERIFIED. CPU-executed checks: ring buffer, CPU-vs-torch(CPU) correctness, ONNX parity
-on CPU, the pipeline's CPU code path, dashboard rendering.
+The code was written in a Linux container with **no NVIDIA GPU**, CPU-only torch 2.15.0; CPU-side
+checks (ring buffer, CPU-vs-torch correctness, ONNX on CPU, the pipeline's CPU path, dashboard
+rendering) ran there. Everything GPU-side was then run on the target machine: **RTX 4060 Laptop
+GPU, Windows, Python 3.13.5, torch 2.10.0+cu128 (CUDA 12.8), triton-windows 3.6.0,
+onnxruntime-gpu 1.26.0**. Results, evidence and what is still unverified are in CLAIMS.md; the
+GPU numbers are in FINDINGS.md. The README quotes the `paced` (real-time rate) run as the latency
+headline; the `overlap` run is what the pytest assertion and `benchmark_latency.csv` use.
+
+Changes forced by the first GPU runs: the launch was split at `eigh` (the first look-ahead ordering
+measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default build targets CUDA 13).
 
 ## 10. Interpretations of the brief (flag if wrong)
 
@@ -179,7 +183,7 @@ on CPU, the pipeline's CPU code path, dashboard rendering.
    `scripts/ui_contention.py` (reproduces the process-isolation finding), `.gitignore`,
    `results/profiler_trace.json`, `results/profiler_overlap.png`,
    `results/profiler_overlap.csv`, `results/benchmark_summary.csv`,
-   `results/benchmark_latency_baseline.csv` (and `_paced.csv` with `PACED=1`).
+   `results/benchmark_latency_baseline.csv` (and `_paced.csv`).
 4. The brief's latency *test* "writes results/benchmark_latency.csv". Here `test_latency.py`
    asserts p99 and `make benchmark` is the single writer of `results/`, so the CSV, summary
    and histogram always come from the same run.
