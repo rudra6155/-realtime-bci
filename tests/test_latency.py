@@ -23,13 +23,15 @@ from conftest import require_cuda
 
 FORBIDDEN_ATTRS = {"item", "cuda", "cpu", "tolist"}
 HOT_PATH = {                         # module -> functions that run per chunk
-    gpu_pipeline: ["GPUPipeline.stage", "GPUPipeline.launch", "GPUPipeline.collect",
+    gpu_pipeline: ["GPUPipeline.stage", "GPUPipeline.launch_pre", "GPUPipeline.launch_post",
+                   "GPUPipeline.launch", "GPUPipeline.collect",
                    "GPUPipeline.process", "drive"],
     filters: ["FIRBandpass.forward"],
-    classifier: ["RiemannianLDA.covariance", "RiemannianLDA.tangent", "RiemannianLDA.head",
-                 "RiemannianLDA.forward"],
+    classifier: ["RiemannianLDA.covariance", "RiemannianLDA.whiten", "RiemannianLDA.log_features",
+                 "RiemannianLDA.tangent", "RiemannianLDA.head", "RiemannianLDA.forward"],
 }
 NO_LOOPS = [filters.FIRBandpass.forward, classifier.RiemannianLDA.covariance,
+            classifier.RiemannianLDA.whiten, classifier.RiemannianLDA.log_features,
             classifier.RiemannianLDA.tangent, classifier.RiemannianLDA.head,
             classifier.RiemannianLDA.forward]        # vectorized over channels: no loops at all
 
@@ -60,7 +62,7 @@ def test_hot_path_has_no_sync_or_print_calls(dotted, node):
 
 
 def test_async_copies_are_used_in_hot_path():
-    for name in ("stage", "launch"):
+    for name in ("stage", "launch_post"):
         src = inspect.getsource(getattr(GPUPipeline, name))
         assert "non_blocking=" in src, f"GPUPipeline.{name} must issue non_blocking copies"
 

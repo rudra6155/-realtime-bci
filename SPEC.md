@@ -68,18 +68,22 @@ Tests are parametrized over `cpu` and `cuda`; `cuda` cases are skipped when CUDA
 * **Pinned memory**: `n_slots = 3` pre-allocated pinned input buffers and pinned output
   buffers. Device buffers are pre-allocated. H2D is `copy_(..., non_blocking=True)`.
   No `.cuda()` / `.to(device)` calls in the hot path.
-* **Overlap**: the host stages chunk *N* (pinned memcpy + async H2D on the copy stream)
-  **before** it launches compute for chunk *N-1*, so the transfer for *N* runs while the
-  GPU executes *N-1*. A slot is reused only after the events guarding it have completed.
+* **Overlap**: per chunk the host runs `launch_pre(N-1)` (enqueue filter → covariance →
+  whitening; non-blocking), then `stage(N)` (pinned memcpy + async H2D on the copy stream),
+  then `launch_post(N-1)` (`eigh`, which blocks the host, then log → LDA → async D2H). The H2D
+  copy for *N* is therefore issued while the GPU is executing *N-1*'s first kernels. A slot is
+  reused only after the events guarding it have completed. (A first version staged *N* before
+  launching *N-1*; the profiler trace showed 0 µs of overlap because the GPU was idle at that
+  moment, see FINDINGS.md.)
 * **No `.item()` / `print()` / tensor-to-Python reads in the hot path.** Results are read
   from pinned host buffers after the per-slot "done" event. A test inspects the hot-path
   source (AST) for `.item`, `.cuda`, `.cpu`, `.tolist` and `print`.
 * **Known synchronization point**: `torch.linalg.eigh` on CUDA "synchronizes that device
   with the CPU" (PyTorch docs; there is no `eigh_ex`). The Riemannian tangent-space map
   needs a symmetric eigendecomposition, so the compute launch for a chunk blocks the host
-  once, inside `eigh`. This is a direct consequence of choosing Riemannian + LDA. The
-  staging order above (H2D for *N* enqueued before `launch(N-1)` blocks) exists so that
-  this does not remove the copy/compute overlap. The profiler trace will show this sync.
+  once, inside `eigh`. This is a direct consequence of choosing Riemannian + LDA.
+  The launch is split at `eigh` so the copy for the next chunk is enqueued before the host
+  blocks there. The profiler trace shows this sync (device-to-host copies on the compute stream).
 * **`torch.compile`**: Inductor generates GPU code with Triton. If compile or Triton is
   unavailable (for example, as far as I know, native Windows has no official Triton), the
   filter **falls back to eager** with a logged warning, and the result files record

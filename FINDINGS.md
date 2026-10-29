@@ -21,10 +21,11 @@ GPUPipeline  (src/bci/gpu_pipeline.py)
 LiveEngine (thread) ── ProcessEngine (child process) ──▶ Streamlit dashboard  /  FastAPI WebSocket server
 ```
 
-Per chunk the host runs `stage(N)` → `launch(N-1)` → `collect(N-1)`. Staging N first puts N's
-H2D on the copy stream before the host blocks inside N-1's `torch.linalg.eigh` (a documented
-CPU/GPU sync), which is what allows copy/compute overlap at all. `n_slots = 3` pinned input
-slots and events guard reuse in both directions.
+Per chunk the host runs `launch_pre(N-1)` → `stage(N)` → `launch_post(N-1)` → `collect(N-1)`:
+the filter/covariance/whitening kernels for N-1 are enqueued first (non-blocking), then N's
+H2D copy is issued while they run, then the host blocks inside N-1's `torch.linalg.eigh` (a
+documented CPU/GPU sync). `n_slots = 3` pinned input slots and events guard reuse in both
+directions.
 
 ## 2. Latency breakdown (RTX 4060 Laptop GPU)
 

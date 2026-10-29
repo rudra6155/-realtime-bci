@@ -145,13 +145,20 @@ class RiemannianLDA(torch.nn.Module):
         cov = cov * (self.n_channels / trace)
         return (1.0 - self.shrinkage) * cov + self.shrinkage * self.eye
 
-    def tangent(self, cov: torch.Tensor) -> torch.Tensor:
-        """``(B, C, C)`` SPD -> ``(B, F)`` tangent-space features."""
+    def whiten(self, cov: torch.Tensor) -> torch.Tensor:
+        """``(B, C, C)`` SPD -> ``C_ref^{-1/2} C C_ref^{-1/2}`` (symmetrized). Matmuls only: never blocks."""
         m = self.ref_inv_sqrt @ cov @ self.ref_inv_sqrt
-        m = 0.5 * (m + m.transpose(-1, -2))
+        return 0.5 * (m + m.transpose(-1, -2))
+
+    def log_features(self, m: torch.Tensor) -> torch.Tensor:
+        """Whitened SPD ``(B, C, C)`` -> ``(B, F)`` tangent-space features via matrix log."""
         evals, evecs = torch.linalg.eigh(m)               # host sync on CUDA (documented)
         logm = (evecs * torch.log(evals).unsqueeze(-2)) @ evecs.transpose(-1, -2)
         return logm.flatten(-2)[:, self.flat_idx] * self.vec_weights
+
+    def tangent(self, cov: torch.Tensor) -> torch.Tensor:
+        """``(B, C, C)`` SPD -> ``(B, F)`` tangent-space features."""
+        return self.log_features(self.whiten(cov))
 
     def head(self, feat: torch.Tensor) -> torch.Tensor:
         return self.lda(feat)

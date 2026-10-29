@@ -9,8 +9,16 @@ Hot-path rules (enforced by ``tests/test_latency.py``):
     overwrite?) and ``d2h_end.synchronize()`` (is the label ready?) — plus the
     ``torch.linalg.eigh`` sync PyTorch documents (see SPEC.md §4).
 
-Per-chunk life cycle (three calls so the host can enqueue chunk N's H2D *before* it
-blocks inside chunk N-1's ``eigh``):  ``stage(N)`` -> ``launch(N-1)`` -> ``collect(N-1)``.
+Per-chunk life cycle, split so chunk N's H2D copy is issued while chunk N-1's first kernels
+are still running on the GPU and *before* the host blocks inside N-1's ``eigh``:
+
+    launch_pre(N-1)   enqueue filter -> covariance -> whitening   (non-blocking)
+    stage(N)          pinned copy + async H2D on the copy stream  (overlaps those kernels)
+    launch_post(N-1)  eigh (host sync) -> log -> LDA -> async D2H
+    collect(N-1)
+
+(An earlier ordering, ``stage(N)`` before ``launch(N-1)``, measured 0 us of overlap in the
+profiler trace: the GPU was idle when the copy was issued. See FINDINGS.md.)
 """
 
 from __future__ import annotations
@@ -127,6 +135,7 @@ class GPUPipeline:
 
         self._free = collections.deque(range(n_slots))
         self._meta: list[tuple[int, int]] = [(0, 0)] * n_slots
+        self._whitened: list[torch.Tensor | None] = [None] * n_slots     # launch_pre -> launch_post hand-off
 
     # ------------------------------------------------------------------ helpers
     def _ctx(self, stream):
@@ -170,17 +179,22 @@ class GPUPipeline:
         self._meta[slot] = (index, t_recv_ns)
         return slot
 
-    def launch(self, slot: int) -> None:
-        """Enqueue filter -> covariance -> tangent -> LDA on the compute stream, then D2H."""
+    def launch_pre(self, slot: int) -> None:
+        """Enqueue filter -> covariance -> whitening on the compute stream. Never blocks the host."""
         with self._ctx(self._compute_stream), torch.no_grad():
             if self.overlap:
                 self._compute_stream.wait_event(self._events[slot]["h2d_end"])
             self._mark(slot, "c_start")
             y = self.filter(self._dev_in[slot].unsqueeze(0))
             self._mark(slot, "filter_end")
-            cov = self.model.covariance(y)
+            self._whitened[slot] = self.model.whiten(self.model.covariance(y))
             self._mark(slot, "cov_end")
-            scores = self.model.head(self.model.tangent(cov))
+
+    def launch_post(self, slot: int) -> None:
+        """eigh (documented host sync) -> log -> LDA on the compute stream, then async D2H."""
+        with self._ctx(self._compute_stream), torch.no_grad():
+            m, self._whitened[slot] = self._whitened[slot], None
+            scores = self.model.head(self.model.log_features(m))
             self._dev_scores[slot].copy_(scores[0])
             self._mark(slot, "cls_end")
         with self._ctx(self._copy_stream):
@@ -188,6 +202,11 @@ class GPUPipeline:
                 self._copy_stream.wait_event(self._events[slot]["cls_end"])
             self._host_scores[slot].copy_(self._dev_scores[slot], non_blocking=self._async)
             self._mark(slot, "d2h_end")
+
+    def launch(self, slot: int) -> None:
+        """Both halves back to back (the real-time path, where there is nothing to overlap with)."""
+        self.launch_pre(slot)
+        self.launch_post(slot)
 
     def collect(self, slot: int) -> Result:
         """Wait for the slot's output, build the :class:`Result`, free the slot."""
@@ -219,8 +238,8 @@ def drive(pipe: GPUPipeline, ring: RingBuffer, chunks: Iterable[Chunk],
           lookahead: bool = True) -> Iterator[Result]:
     """Feed chunks through ring buffer + pipeline, yielding a :class:`Result` per decoded chunk.
 
-    ``lookahead=True`` stages chunk N (pinned copy + async H2D) *before* launching chunk N-1,
-    which is what lets the H2D copy overlap the previous chunk's GPU work.
+    ``lookahead=True`` issues chunk N's pinned copy + async H2D *between* the two halves of chunk
+    N-1's launch, so the copy runs while N-1's filter/covariance kernels execute.
     """
     pending: int | None = None
     for chunk in chunks:
@@ -231,10 +250,12 @@ def drive(pipe: GPUPipeline, ring: RingBuffer, chunks: Iterable[Chunk],
             ring.consume(n)                                # window still filling
             continue
         if lookahead:
-            slot = pipe.stage(ring, chunk.index, t_recv_ns)
+            if pending is not None:
+                pipe.launch_pre(pending)                   # GPU starts on N-1 ...
+            slot = pipe.stage(ring, chunk.index, t_recv_ns)  # ... while N's H2D copy is issued
             ring.consume(n)
             if pending is not None:
-                pipe.launch(pending)
+                pipe.launch_post(pending)                  # eigh blocks here
                 yield pipe.collect(pending)
             pending = slot
         else:

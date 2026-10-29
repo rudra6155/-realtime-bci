@@ -70,9 +70,10 @@ SyntheticEEGStream ──64×64 chunk──▶ RingBuffer (1000×64, O(1) writes
                                                                               label + scores in pinned memory ◀──┘
 ```
 
-* **Look-ahead overlap:** the host stages chunk *N* (pinned copy + async H2D) before it launches
-  the compute for chunk *N-1*, so the copy for *N* runs while the GPU works on *N-1*. Slot reuse
-  is guarded by CUDA events, not host syncs.
+* **Look-ahead overlap:** the host enqueues chunk *N-1*'s filter/covariance kernels, then
+  stages chunk *N* (pinned copy + async H2D), then runs *N-1*'s `eigh` + classifier. The copy for
+  *N* is issued while the GPU is busy with *N-1*. Slot reuse is guarded by CUDA events, not host
+  syncs. How much this buys is a measurement (see FINDINGS.md): the copy is only ~11 µs.
 * **Hot path has no `.item()`, `.cuda()`, `.cpu()`, `.tolist()` or `print`** — enforced by an AST
   test. One host synchronization is unavoidable: `torch.linalg.eigh` on CUDA synchronizes with
   the CPU (PyTorch documents it). It follows from choosing a Riemannian classifier.
