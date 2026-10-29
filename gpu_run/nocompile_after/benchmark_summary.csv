@@ -1,0 +1,13 @@
+run,metric,n,mean_ms,p50_ms,p90_ms,p99_ms,max_ms,mode,pipeline,filter_compiled,warmup_discarded,wall_ms_per_chunk,device,device_name,torch,cuda,python
+overlap,e2e,1000,8.881604,8.543150,10.249210,12.574965,13.958900,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+overlap,h2d,1000,0.056477,0.051536,0.075526,0.122872,0.153408,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+overlap,filter,1000,0.301429,0.281600,0.375885,0.509972,0.972032,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+overlap,cov,1000,0.684853,0.641440,0.849264,1.178642,1.438720,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+overlap,classifier,1000,3.245200,3.152896,3.705984,4.431012,4.743200,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+overlap,d2h,1000,0.095031,0.086592,0.123162,0.187761,0.250208,saturated,"cuda: 2 streams, pinned, async",False,50,4.458345,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,e2e,1000,4.309847,4.191750,4.952610,5.872248,7.063600,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,h2d,1000,0.080627,0.077408,0.101667,0.130432,0.159104,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,filter,1000,0.301919,0.282944,0.371846,0.487588,2.604320,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,cov,1000,0.688434,0.646144,0.864326,1.119406,1.323776,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,classifier,1000,2.983510,2.951280,3.332186,3.888149,4.905984,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5
+baseline,d2h,1000,0.105146,0.097328,0.138262,0.180013,0.240544,saturated,"cuda: 1 stream, pageable, blocking (baseline)",False,50,4.349952,cuda,NVIDIA GeForce RTX 4060 Laptop GPU,2.10.0+cu128,12.8,3.13.5

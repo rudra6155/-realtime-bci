@@ -1,0 +1,16 @@
+metric,value
+n_kernels,7320
+n_h2d,40
+n_d2h,120
+streams_with_kernels,[33]
+streams_with_memcpy,"[29, 33]"
+h2d_total_us,457.99560546875
+h2d_overlapped_with_kernels_us,7.328125
+h2d_overlap_fraction,0.016000426450598362
+d2h_total_us,165.681640625
+d2h_overlapped_with_kernels_us,0.0
+d2h_overlap_fraction,0.0
+kernel_total_us,71771.12841796875
+chunks_profiled,40
+device,NVIDIA GeForce RTX 4060 Laptop GPU
+torch,2.10.0+cu128
