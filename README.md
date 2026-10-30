@@ -53,6 +53,37 @@ Two things to know before quoting these numbers:
 *Recorded on the RTX 4060 laptop: the page shows the device and a live rolling p99.* The decoder
 uses the latest 2 s of data, so its label trails a change of simulated intent by up to ~2 s.
 
+## Real EEG (BCI Competition IV 2a) and LSL
+
+The same pipeline decodes the real **BCI Competition IV 2a** motor-imagery dataset (9 subjects, 4 classes,
+22 EEG channels, loaded with MOABB) streamed through **Lab Streaming Layer** from a separate producer process.
+Per subject: train on session T, stream session E, score on the experts' artifact-free trials.
+
+| | accuracy | Cohen's kappa |
+|---|---|---|
+| this pipeline, fixed window (deployable) | 0.592 | **0.456** |
+| this pipeline, best time point (competition-style) | | 0.510 |
+| 2008 competition winner (Ang et al., FBCSP) | | 0.57 |
+
+**It does not beat the winner.** It matches or beats it on S1 and S6, is far below on S2, S3, S5, S7, S8, and the
+two sets of per-subject kappas correlate at r = 0.88. The comparison is approximate (the competition scored a
+sample-by-sample causal output and took the best time point). BCI Competition IV was held in **2008**.
+Artifacts are logged, not removed (no ICA): 8.6% of evaluation trials are expert-flagged and decode at 0.52
+accuracy vs 0.60 for clean trials. Detail, per-subject table and caveats: [FINDINGS.md](FINDINGS.md) §6,
+figure `results/real/kappa_vs_competition.png`.
+
+**LSL jitter** (std of producer timestamp → ring buffer delay, loopback, separate producer process) was
+**0.24 ms** in the test (limit 1 ms), 0.47 ms with the pipeline running on the same machine. These were measured
+on Linux; the GPU-machine run of the real-data latency and jitter is still to do (FINDINGS §7.1).
+
+```bash
+pip install -e ".[dev]"                       # includes moabb + pylsl
+make benchmark-real                           # 9-subject accuracy/kappa, then real-data latency + LSL jitter (GPU) -> results/real/
+make test-real                                # also runs the tests that download the dataset (~80 MB per subject)
+```
+
+The closed-loop dashboard (cursor, sample-to-action latency) is **not implemented yet**.
+
 ## Quick start
 
 On a machine with an NVIDIA GPU, **first** install a CUDA build of PyTorch (the default PyPI wheel
@@ -125,11 +156,12 @@ Details and every decision: [SPEC.md](SPEC.md).
 ## Layout
 
 ```
-src/bci/    stream.py ring_buffer.py filters.py classifier.py gpu_pipeline.py server.py
+src/bci/    stream.py ring_buffer.py filters.py classifier.py gpu_pipeline.py server.py lsl_stream.py real_benchmark.py
 app/        dashboard.py            Streamlit UI (Hugging Face Spaces entry point)
-tests/      test_ring_buffer.py test_correctness.py test_latency.py test_dashboard.py test_server.py test_profile_analysis.py
+tests/      test_ring_buffer.py test_correctness.py test_latency.py test_dashboard.py test_server.py test_profile_analysis.py test_real_stream.py test_lsl.py
 scripts/    run_benchmark.sh profile.py record_gif.py ui_contention.py
 results/    benchmark_*.csv, latency_histogram.png, profiler_*, dashboard_demo.gif   (from the GPU run)
+            real/  real-data accuracy, kappa time course, noise log, kappa chart (container CPU run)
 gpu_run/    extra GPU runs (eager-filter A/B);  gpu_*.txt in the root: console logs of the GPU runs (UTF-16)
 ```
 

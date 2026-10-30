@@ -1,9 +1,9 @@
-# make install | test | benchmark | dashboard | profile | serve
+# make install | test | benchmark | benchmark-real | dashboard | profile | serve
 PYTHON ?= python
 # make test fails (instead of skipping) GPU tests when CUDA is missing. CI sets REQUIRE_CUDA=0.
 REQUIRE_CUDA ?= 1
 
-.PHONY: install test benchmark dashboard profile serve gif clean
+.PHONY: install test test-real benchmark benchmark-real dashboard profile serve gif clean
 
 install:
 	$(PYTHON) -m pip install -e ".[dev]"
@@ -14,6 +14,15 @@ test:
 
 benchmark:
 	PYTHON=$(PYTHON) bash scripts/run_benchmark.sh
+
+# Real EEG (BCI Competition IV 2a, downloads ~700 MB via MOABB on first use): accuracy + kappa for 9 subjects,
+# then label latency and LSL jitter on the GPU -> results/real/
+benchmark-real:
+	$(PYTHON) -m bci.real_benchmark all --out-dir results/real
+
+# also run the tests that need the real dataset
+test-real:
+	BCI_RUN_REAL=1 BCI_REQUIRE_CUDA=$(REQUIRE_CUDA) $(PYTHON) -m pytest
 
 dashboard:
 	$(PYTHON) -m streamlit run app/dashboard.py

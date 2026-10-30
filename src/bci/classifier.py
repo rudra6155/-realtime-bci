@@ -93,8 +93,8 @@ def features_cpu(params: RiemannianLDAParams, x: np.ndarray) -> dict[str, np.nda
 
 
 def fit(x: np.ndarray, y: np.ndarray, taps: np.ndarray | None = None,
-        shrinkage: float = COV_SHRINKAGE) -> RiemannianLDAParams:
-    """Offline CPU training on windows ``x (N, T, C)``, labels ``y (N,)``."""
+        shrinkage: float = COV_SHRINKAGE, class_names: tuple[str, ...] | None = None) -> RiemannianLDAParams:
+    """Offline CPU training on windows ``x (N, T, C)``, labels ``y (N,)`` (any number of classes)."""
     taps = design_bandpass_taps() if taps is None else taps
     cov = covariance_cpu(bandpass_cpu(x, taps), shrinkage)
     ref = riemann_mean(cov)
@@ -104,7 +104,9 @@ def fit(x: np.ndarray, y: np.ndarray, taps: np.ndarray | None = None,
     w, b = lda.coef_, lda.intercept_
     if w.shape[0] == 1:                       # binary: expand to two symmetric score rows
         w, b = np.vstack([-w / 2, w / 2]), np.array([-b[0] / 2, b[0] / 2])
-    return RiemannianLDAParams(taps, shrinkage, ref_inv_sqrt, w, b)
+    return RiemannianLDAParams(taps, shrinkage, ref_inv_sqrt, w, b,
+                               class_names if class_names is not None else
+                               (CLASS_NAMES if w.shape[0] == 2 else tuple(f"Class {i}" for i in range(w.shape[0]))))
 
 
 @lru_cache(maxsize=2)

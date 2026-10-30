@@ -25,11 +25,18 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# real EEG (BCI Competition IV 2a via MOABB) and Lab Streaming Layer
+real = [
+    "moabb>=1.2",
+    "pylsl>=1.16",
+]
 dev = [
     "pytest>=8",
     "playwright>=1.44",
     "httpx>=0.27",
     "pillow>=10",
+    "moabb>=1.2",
+    "pylsl>=1.16",
 ]
 
 [tool.setuptools.packages.find]

@@ -10,7 +10,7 @@ vice versa. This is a toy generator; accuracy on it says nothing about real EEG.
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Iterator
 
@@ -32,8 +32,9 @@ TRIAL_CHUNKS = 16                       # class switches every 16 chunks (~4.1 s
 class Chunk:
     index: int
     data: np.ndarray        # (chunk_samples, n_channels) float32
-    label: int              # ground-truth class of this chunk
+    label: int              # ground-truth class of this chunk (-1: none / unknown)
     t_emit_ns: int          # time.perf_counter_ns() when the chunk was completed
+    info: dict | None = None  # source-specific extras (RealEEGStream: run, end_sample, noise)
 
 
 @dataclass(frozen=True)
@@ -178,3 +179,154 @@ def make_trials(n_per_class: int, seed: int = 0, n_samples: int = WINDOW_SAMPLES
         X[i] = synth.generate(n_samples, int(label))
         y[i] = label
     return X, y
+
+
+# =============================================================================== real EEG (BCI Competition IV 2a)
+BCICIV2A_CLASSES = ("Left Hand", "Right Hand", "Feet", "Tongue")
+BCICIV2A_FS = 250
+BCICIV2A_N_EEG = 22
+MI_SECONDS = 4.0              # imagery period after the cue (cue at t=2 s, imagery until t=6 s)
+CLIP_UV = 99.9                # the recording amplifier saturates at +-100 uV
+_MI_LABEL = {"left_hand": 0, "right_hand": 1, "feet": 2, "tongue": 3}
+
+
+@dataclass(frozen=True)
+class RunRecording:
+    """One 48-trial run. Arrays are in microvolts, sample index 0 = start of the run."""
+    eeg: np.ndarray              # (T, 22) float32
+    eog: np.ndarray              # (T, 3) float32  (never used for decoding; noise log only)
+    cue_samples: np.ndarray      # (n_trials,) int64, sample index of the cue onset
+    labels: np.ndarray           # (n_trials,) int64, 0..3 = left, right, feet, tongue
+    artifact: np.ndarray         # (n_trials,) bool, the experts' artifact flag
+
+
+@dataclass(frozen=True)
+class Recording:
+    subject: int
+    session: str                 # "0train" (session T) or "1test" (session E)
+    runs: tuple[RunRecording, ...]
+    ch_names: tuple[str, ...]
+    fs: int = BCICIV2A_FS
+
+    @property
+    def n_trials(self) -> int:
+        return sum(len(r.labels) for r in self.runs)
+
+
+@lru_cache(maxsize=2)
+def _load_subject(subject: int, data_path: str | None):
+    """Both sessions of one subject as MOABB raws (downloads ~80 MB on first use)."""
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")                         # MOABB/MNE FutureWarnings
+        from moabb.datasets import BNCI2014_001
+        return BNCI2014_001(artifact_handling="annotate").get_data(subjects=[subject])[subject]
+
+
+def load_bciciv2a(subject: int, session: str = "1test", data_path: str | None = None) -> Recording:
+    """BCI Competition IV 2a through MOABB. ``session``: ``"0train"`` (T) or ``"1test"`` (E).
+
+    Each class annotation starts at the **cue** and lasts 4 s (checked empirically: decoding is at
+    chance before it and peaks for windows starting 1 s after it). Artifact flags are matched to
+    trials by cue onset. Requires the ``real`` extra (moabb).
+    """
+    raws = _load_subject(subject, data_path)[session]
+    runs = []
+    for key in sorted(raws, key=int):
+        raw = raws[key]
+        fs = raw.info["sfreq"]
+        cues, labels = [], []
+        flagged = [round(a["onset"] * fs) for a in raw.annotations if a["description"] == "bnci_artifact"]
+        for a in raw.annotations:
+            if a["description"] in _MI_LABEL:
+                cues.append(round(a["onset"] * fs))
+                labels.append(_MI_LABEL[a["description"]])
+        cues = np.array(cues, dtype=np.int64)
+        runs.append(RunRecording(
+            eeg=(raw.get_data(picks="eeg") * 1e6).T.astype(np.float32),
+            eog=(raw.get_data(picks="eog") * 1e6).T.astype(np.float32),
+            cue_samples=cues, labels=np.array(labels, dtype=np.int64),
+            artifact=np.isin(cues, np.array(flagged, dtype=np.int64))))
+    names = tuple(raws[sorted(raws, key=int)[0]].copy().pick("eeg").ch_names)
+    return Recording(subject, session, tuple(runs), names)
+
+
+def noise_level(eeg_uv: np.ndarray, eog_uv: np.ndarray | None = None, fs: int = BCICIV2A_FS) -> dict:
+    """Noise metrics for a ``(T, C)`` EEG window in microvolts (artifacts are logged, never removed).
+
+    * ``eeg_p2p_p95_uv``: 95th percentile over channels of the peak-to-peak amplitude;
+    * ``frac_clipped``: fraction of samples at the amplifier limit (|x| >= 99.9 uV);
+    * ``hf_power_frac``: share of spectral power above 30 Hz (muscle/EMG indicator);
+    * ``eog_rms_uv``: RMS of the EOG channels, if given.
+    """
+    x = np.asarray(eeg_uv, dtype=np.float64)
+    spec = np.abs(np.fft.rfft(x - x.mean(axis=0), axis=0)) ** 2
+    freqs = np.fft.rfftfreq(x.shape[0], 1.0 / fs)
+    total = spec[freqs >= 1.0].sum()
+    out = {"eeg_p2p_p95_uv": float(np.percentile(np.ptp(x, axis=0), 95)),
+           "frac_clipped": float((np.abs(x) >= CLIP_UV).mean()),
+           "hf_power_frac": float(spec[freqs > 30.0].sum() / total) if total > 0 else 0.0}
+    if eog_uv is not None:
+        out["eog_rms_uv"] = float(np.sqrt(np.mean(np.asarray(eog_uv, dtype=np.float64) ** 2)))
+    return out
+
+
+class RealEEGStream:
+    """Plays a BCI Competition IV 2a session as a stream of 64-sample chunks (one run after another).
+
+    Same interface as :class:`SyntheticEEGStream` (iterator of :class:`Chunk`, optional 1x real-time
+    pacing) but with 22 EEG channels in microvolts. ``Chunk.label`` is the class of the trial whose
+    imagery period (cue .. cue + 4 s) contains the chunk's last sample, else -1. ``Chunk.info`` carries
+    ``run``, ``end_sample`` (within the run) and ``noise_p2p_uv`` (95th-percentile peak-to-peak of the
+    chunk). Chunks never straddle two runs; the few samples left over at the end of a run are dropped.
+    Pass ``recording=`` to stream an already loaded (or synthetic stand-in) :class:`Recording`.
+    """
+
+    def __init__(self, subject: int = 1, session: str = "1test", *, recording: Recording | None = None,
+                 runs: list[int] | None = None, n_chunks: int | None = None, realtime: bool = False,
+                 chunk_samples: int = CHUNK_SAMPLES) -> None:
+        self.recording = recording if recording is not None else load_bciciv2a(subject, session)
+        self.n_channels = self.recording.runs[0].eeg.shape[1]
+        self.fs, self.chunk_samples, self.realtime = self.recording.fs, chunk_samples, realtime
+        run_ids = list(range(len(self.recording.runs))) if runs is None else list(runs)
+        self._plan = [(r, k) for r in run_ids for k in range(self.recording.runs[r].eeg.shape[0] // chunk_samples)]
+        if n_chunks is not None:
+            self._plan = self._plan[:n_chunks]
+        self._index = 0
+        self._t0: float | None = None
+
+    @property
+    def chunk_period_s(self) -> float:
+        return self.chunk_samples / self.fs
+
+    def __len__(self) -> int:
+        return len(self._plan)
+
+    def __iter__(self) -> Iterator[Chunk]:
+        return self
+
+    def _label_at(self, run: RunRecording, last_sample: int) -> int:
+        k = int(np.searchsorted(run.cue_samples, last_sample, side="right")) - 1
+        if k >= 0 and last_sample < run.cue_samples[k] + MI_SECONDS * self.fs:
+            return int(run.labels[k])
+        return -1
+
+    def __next__(self) -> Chunk:
+        if self._index >= len(self._plan):
+            raise StopIteration
+        run_i, k = self._plan[self._index]
+        run = self.recording.runs[run_i]
+        start = k * self.chunk_samples
+        data = run.eeg[start:start + self.chunk_samples]
+        if self.realtime:
+            now = time.perf_counter()
+            if self._t0 is None:
+                self._t0 = now
+            deadline = self._t0 + (self._index + 1) * self.chunk_period_s
+            if deadline > now:
+                time.sleep(deadline - now)
+        chunk = Chunk(self._index, data, self._label_at(run, start + self.chunk_samples - 1), time.perf_counter_ns(),
+                      {"run": run_i, "end_sample": start + self.chunk_samples,
+                       "noise_p2p_uv": float(np.percentile(np.ptp(data, axis=0), 95))})
+        self._index += 1
+        return chunk

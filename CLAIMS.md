@@ -67,6 +67,26 @@ All data are synthetic.
 | C7 | **OPEN:** why one pytest printout was 1.8× the CLI benchmark on the same stack (13.79 vs 7.7 ms p50, `gpu_pytest2.txt` vs `gpu_benchmark.txt`) | OPEN | candidates: other CUDA libraries loaded in the pytest process, background GPU load |
 | C8 | Alternatives to shrink the classifier stage (float32 `eigh`, a matmul-only matrix log, CUDA graphs for the non-`eigh` kernels) | UNVERIFIED | not tried; the 50 ms target is met without them |
 
+## D. Phase 2: real EEG (BCI Competition IV 2a) and LSL
+
+Run in the container (CPU device) unless a row says otherwise. The closed-loop dashboard is **not done**
+(stop point set by the requester).
+
+| # | Claim | Status | Evidence |
+|---|---|---|---|
+| P1 | MOABB 1.7.2 loads BCICIV 2a as expected: subject 1 session E has 6 runs, 288 trials (72 per class), 22 EEG + 3 EOG channels at 250 Hz, EEG std ≈ 10 µV, amplifier limit 100 µV, 7 expert-flagged trials | VERIFIED (S1; S1 and S4 also checked for NaNs: none) | `BCI_RUN_REAL=1 pytest tests/test_real_stream.py::test_real_recording_structure` |
+| P2 | The class annotation onset is the **cue**: CV accuracy of a 2 s window is 0.239 (window −2..0 s), 0.292 (−1..1), 0.657 (0..2), 0.722 (1..3), 0.642 (2..4) | VERIFIED (subject 1, session T) | `python -m bci.real_benchmark offset-check --subject 1` |
+| P3 | `RealEEGStream`: 64-sample chunks that never straddle a run, labels = class during the imagery period else −1, 1× pacing (4 chunks ≈ 1.02 s) | VERIFIED on a synthetic stand-in recording (no download) | `pytest tests/test_real_stream.py` |
+| P4 | **Real-data results**, 9 subjects, session T → E, streamed through the pipeline, artifact-free trials: 4-class accuracy **0.592**, Cohen's kappa **0.456** (fixed window) and **0.510** (best time point); left-vs-right accuracy 0.752 | VERIFIED (container, CPU device; GPU re-run pending) | `results/real/accuracy_per_subject.csv`, `kappa_timecourse.csv`; `python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu` |
+| P5 | **Below the 2008 winner's mean kappa of 0.57** (0.11 below at the fixed window, 0.06 at the best time point; ≥ winner on S1 and S6, and S9 at the best time point; r = 0.88 with the winner's per-subject kappas). The comparison is approximate (see FINDINGS §6.2) | VERIFIED | same files; winner's numbers from bbci.de/competition/iv/results (fetched 2026-10-30) |
+| P6 | BCI Competition IV took place in **2008** (results 12 Dec 2008); the brief's "2012" is the review/journal-paper year. The competition scored the largest kappa of a time course on artifact-free trials; trials: fixation 0 s, cue 2 s, imagery until 6 s; artifact trials flagged by experts | VERIFIED from sources (not from this repo) | bbci.de/competition/iv/ (dates); bbci.de/competition/iv/desc_2a.pdf (timing, evaluation, artifacts); results page (0.57 and the per-subject table) |
+| P7 | Noise log: 2592 trials, 224 (8.6%) expert-flagged; accuracy 0.522 flagged vs 0.597 clean; 0.615 / 0.595 / 0.561 across peak-to-peak terciles; 1.4% of trials contain clipped samples | VERIFIED | `results/real/noise_log.csv` (analysis snippet in FINDINGS §6.3 was run ad hoc, not a repo command) |
+| P8 | **LSL jitter < 1 ms** (std of producer-timestamp → ring-buffer delay): 0.240 ms over 50 chunks with an idle CPU (test), 0.177 ms over 54 chunks (CLI), 0.472 ms over 150 chunks while the pipeline ran on the same machine. Loopback only; separate producer process; first 5 chunks excluded | VERIFIED (container, Linux). **Not measured on the Windows GPU machine yet** | `pytest tests/test_lsl.py -s`; `python -m bci.lsl_stream jitter --seconds 15`; `cpu_smoke` run of `real_benchmark latency` |
+| P9 | Float32 data crosses LSL bit-identical; the pipeline gives identical scores (atol 1e-9) whether chunks come from the generator or through LSL | VERIFIED | `tests/test_lsl.py` |
+| P10 | Real-data **label latency on the GPU** (chunks arriving through LSL) | **NOT YET RUN**. Only a CPU smoke test exists (150 chunks: p50 1.91 / p99 3.72 ms, not a GPU number) | `python -m bci.real_benchmark latency` on the GPU machine |
+| P11 | Windows behaviour of `pylsl`/liblsl (discovery, firewall prompts) and of the MOABB download on the GPU machine | UNVERIFIED | |
+| P12 | Full suite in the container with the real-data tests enabled: **64 passed, 9 skipped** (all CUDA-only) | VERIFIED | `make test-real REQUIRE_CUDA=0` → `64 passed, 9 skipped in 136.45s` |
+
 ## Definition of done
 
 | Item | Status |
@@ -77,10 +97,10 @@ All data are synthetic.
 | Dashboard runs and is ready for Hugging Face Spaces | Runs locally on CPU and GPU (A13, G12); the Spaces deployment itself is untested (C4) |
 | CLAIMS.md all VERIFIED | **Not literally**: C1–C5 are UNVERIFIED and C6–C8 are open, each stated above |
 
-## What the GPU machine has not run yet
+## GPU-machine re-run of the final code
 
-The GPU machine ran commit `07c4ee9` (55 tests: 54 passed, 1 skipped) and produced `results/`.
-Changed since, verified in the container only: `scripts/profile.py` (two-panel figure and
-`--from-trace`, regenerating `results/profiler_overlap.png` from the real trace), 2 new tests for
-it, `scripts/run_benchmark.sh` (paced run now on by default), the `pyproject.toml` pin
-`onnxruntime-gpu>=1.21,<1.27` (matches the stack already installed there), and the docs.
+Commit `7c23d61` (pulled and run on the GPU machine): **56 passed, 1 skipped** in 83.6 s with
+`BCI_REQUIRE_CUDA=1` (`gpu_pytest_full3.txt`). The skip is the CPU `torch.compile` test (no C++
+compiler on `PATH` on Windows). This closes the gap that earlier rows listed (two new profiler tests,
+the `profile.py` figure change, the paced-by-default `run_benchmark.sh` and the `onnxruntime-gpu`
+pin): all of it ran on the GPU machine and passed.

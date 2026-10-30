@@ -254,3 +254,121 @@ effect in smaller form (paced ~2× p50). Quote the paced number as the real-time
 * **Not run anywhere:** Docker build, GitHub Actions, a Hugging Face Space (CLAIMS.md rows C1, C2, C5).
 * **The overlap design buys nothing here** (§3.1): it is implemented and measured, not beneficial.
 * **Single-chunk window.** One decode window per chunk; no batching across chunks or users.
+
+## 6. Phase 2: real EEG, BCI Competition IV dataset 2a
+
+Scope set by the requester: real-data stream, LSL with a jitter test, and the real-data benchmark. The
+closed-loop dashboard is **not** part of this phase. Everything in §6–7 was run in the **CPU-only
+container** (torch 2.15.0+cpu, MOABB 1.7.2, MNE 1.13.2, pylsl with liblsl library version 118); the
+**GPU re-run of the real-data latency and of the LSL jitter on the RTX 4060 has not been done yet**
+(commands at the end).
+
+**Data and protocol** (details in SPEC.md §11). 9 subjects, 2 sessions on different days, 288 trials per
+session, 4 classes (left hand, right hand, feet, tongue), 22 EEG + 3 EOG channels, 250 Hz. Per subject:
+train on session T (all trials, artifact-flagged ones included, 9 windows per trial), stream session E run
+by run as 64-sample chunks through ring buffer + pipeline, score on the experts' artifact-free trials (the
+competition's evaluation set). EOG is used only for the noise log. No ICA, no artifact removal.
+
+Cue alignment was **checked, not assumed**: `python -m bci.real_benchmark offset-check --subject 1` gives
+5-fold CV accuracy of a 2 s window by start offset after MOABB's class annotation: 0.239 (window −2..0 s,
+chance 0.25), 0.292, **0.657** (0..2 s), **0.722** (1..3 s), 0.642, then ~0.5. So the annotation is the cue
+(trial t = 2 s) and imagery follows it, as the official description says (cue at 2 s, imagery until 6 s).
+
+### 6.1 Accuracy and Cohen's kappa (4 classes, session T → E, artifact-free trials)
+
+`results/real/accuracy_per_subject.csv`; per-time-bin kappas `results/real/kappa_timecourse.csv`; figure
+`results/real/kappa_vs_competition.png`. Fixed window = window ending 3.06 s after the cue (chosen a priori
+from subject 1's session-T cross-validation; not tuned on E). Best time point = maximum over the 16-bin
+kappa time course (the competition's criterion was "the largest kappa value"; optimistic by construction).
+
+| subject | artifact trials (E) | accuracy (fixed) | kappa (fixed) | kappa (best time point) | at (s after cue) | 2008 winner kappa | left-vs-right accuracy |
+|---|---|---|---|---|---|---|---|
+| S1 | 7/288 | 0.765 | 0.687 | 0.701 | 2.55 | 0.68 | 0.801 |
+| S2 | 5/288 | 0.463 | 0.284 | 0.284 | 3.06 | 0.42 | 0.535 |
+| S3 | 15/288 | 0.703 | 0.604 | 0.707 | 2.55 | 0.75 | 0.876 |
+| S4 | 60/288 | 0.469 | 0.295 | 0.423 | 2.29 | 0.48 | 0.724 |
+| S5 | 12/288 | 0.388 | 0.188 | 0.240 | 2.55 | 0.40 | 0.556 |
+| S6 | 73/288 | 0.474 | 0.299 | 0.311 | 2.04 | 0.27 | 0.713 |
+| S7 | 11/288 | 0.708 | 0.611 | 0.663 | 2.55 | 0.77 | 0.793 |
+| S8 | 17/288 | 0.679 | 0.571 | 0.625 | 2.80 | 0.75 | 0.948 |
+| S9 | 24/288 | 0.678 | 0.570 | 0.635 | 2.29 | 0.61 | 0.823 |
+| **mean** | 224/2592 | **0.592** | **0.456** | **0.510** | | **0.57** | **0.752** |
+
+All trials (flagged ones included): accuracy 0.590, kappa 0.454 (fixed) / 0.507 (best). Left-vs-right from
+the same 4-class scores: accuracy 0.752, kappa 0.506. Chance is accuracy 0.25 and kappa 0.
+
+### 6.2 Comparison with the BCI Competition IV winner (kappa 0.57)
+
+* **We do not beat it.** Mean kappa 0.456 at the fixed window and 0.510 at the best time point, against
+  0.57 (Kai Keng Ang et al., filter-bank CSP + Naive Bayes Parzen window). That is 0.11 / 0.06 below. The
+  best-time-point figure is close to the competition's second place (0.52; third was 0.31).
+* Per subject we match or exceed the winner on S1 and S6 (both metrics) and S9 (best time point only); we are
+  well below it on S2, S3, S5, S7, S8. Across subjects the two sets of kappas correlate at r = 0.88: the
+  same subjects are easy and hard for both methods.
+* **Correction to the brief:** BCI Competition IV was held in **2008** (launched 3 Jul, submissions closed
+  21 Nov, results 12 Dec 2008). 2012 is the year of the review article (Tangermann et al., Front. Neurosci.)
+  and of the journal version of the winning method. The 0.57 is right (bbci.de results page).
+* **The comparison is approximate.** The competition scored a causal, sample-by-sample class output and took
+  the best point of the kappa time course; here the output is one decision per 256 ms chunk from a 2 s
+  window, one 8–30 Hz band, no filter bank, no temporal smoothing. Both numbers choose the best time point on
+  the evaluation data. Both use artifact-free trials, session T → E, subject-specific models.
+* The fixed window was not re-selected after seeing E. The mean time course peaks earlier: kappa(t) of
+  −0.00 (0.50 s), 0.07 (1.01), 0.25 (1.52), 0.44 (2.04), **0.49 (2.29)**, 0.49 (2.55), 0.46 (3.06), 0.43 (3.57),
+  0.38 (4.34). Using 2.29 s would have given 0.49 instead of 0.46, but that is a choice made on E.
+* Levers not tried (any would have to be chosen by session-T cross-validation, never on E): a filter bank of
+  several bands, voting/smoothing over consecutive chunks, window length, regularization.
+
+### 6.3 Noise log (artifacts logged, not removed)
+
+`results/real/noise_log.csv`: one row per session-E trial (2592), measured over the decision window
+(1–3 s after the cue): EEG peak-to-peak (95th percentile over channels), fraction of samples at the
+amplifier limit (|x| ≥ 99.9 µV; the recording clips at ±100 µV), share of power above 30 Hz, EOG RMS, the
+experts' flag and whether the fixed-window prediction was right.
+* Experts flagged 224 of 2592 trials (8.6%); S4 (60) and S6 (73) account for 133 of them.
+* Fixed-window accuracy (pooled): **0.522 on flagged vs 0.597 on clean** trials. By peak-to-peak tercile:
+  0.615 (37–63 µV), 0.595 (63–78 µV), 0.561 (78–200 µV): noisier trials decode worse, but not dramatically.
+* Median EEG peak-to-peak 69.8 µV (95th percentile 112.4); median EOG RMS 9.1 µV (95th 17.6); only 1.4% of
+  trials contain clipped samples, so clipping is not the main artifact. Flagged trials have a *lower* share of
+  >30 Hz power (median 0.114 vs 0.181 for clean): the flagged artifacts look low-frequency (eye/drift), not
+  muscle.
+* The pipeline handled all of it without special cases: no NaNs in the data (checked for subjects 1 and 4),
+  no numerical failures in the float64 covariance/`eigh` path.
+
+### 6.4 What was run where
+
+Accuracy/kappa/noise: container, CPU device, `python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu`
+(about 25 s per subject; the 22-channel pipeline takes ~2 ms per chunk on CPU). The GPU machine should reproduce
+these numbers up to float rounding (the correctness tests bound the difference at ≤ 1e-5 on scores).
+The latency path (real chunks → LSL → ring buffer → pipeline) ran in the container as a CPU smoke test only
+(150 chunks: label latency p50 1.91 / p99 3.72 ms, LSL-timestamp-to-label p99 6.6 ms): **not a GPU number**.
+
+## 7. Phase 2: LSL transport and jitter
+
+`src/bci/lsl_stream.py`: a producer in its own process pushes 64-sample float32 chunks at 1× real time
+through a `pylsl` outlet; an inlet pulls them into the ring buffer. **Jitter = standard deviation of
+(`t_ring` − producer timestamp)**, with `t_ring` = `local_clock()` right after `RingBuffer.write`, clock offset
+corrected by `time_correction()`, inlet post-processing off. The test `tests/test_lsl.py` asserts **< 1 ms**.
+
+Container, loopback, 64-channel synthetic chunks, producer process separate, first 5 chunks excluded:
+
+| measurement | chunks | jitter (std) | mean delay | p50 | p99 | p99−p50 | max | producer schedule std |
+|---|---|---|---|---|---|---|---|---|
+| `tests/test_lsl.py` (idle CPU) | 50 | **0.240 ms** | 0.976 | 0.885 | 1.611 | 0.726 | 1.704 | 0.062 ms |
+| `python -m bci.lsl_stream jitter --seconds 15` | 54 | 0.177 ms | 0.927 | 0.892 | 1.658 | 0.766 | 1.808 | 0.232 ms |
+| real recordings (S1 E) with the pipeline running (`real_benchmark latency`, CPU smoke) | 150 | 0.472 ms | 0.832 | 0.768 | 1.581 | 0.813 | 6.279 | 1.335 ms |
+
+* Jitter stays below the 1 ms bar in all three, but the third shows what contention does: with the pipeline
+  busy on the same 4-vCPU machine the maximum delay hit 6.3 ms, the producer's own schedule jitter rose to
+  1.3 ms and its worst single deviation from the 256 ms schedule was 11.3 ms. A real amplifier on a quiet machine, or the 4060 laptop, may differ in either direction.
+* Float32 data crosses LSL **bit-identical** (test), and the pipeline gives the same scores whether chunks come
+  straight from the generator or through LSL (`atol = 1e-9`).
+* **Loopback on one machine only**: this says nothing about network (Wi-Fi/Ethernet) jitter. Windows LSL
+  behaviour and the RTX 4060 laptop were **not** measured yet.
+
+### 7.1 GPU-machine run still to do
+
+```powershell
+pip install -e ".[dev]"                       # now includes moabb + pylsl
+$env:BCI_RUN_REAL = "1"; python -m pytest tests/test_lsl.py tests/test_real_stream.py -v -s
+python -m bci.real_benchmark all --out-dir results\real      # 9-subject accuracy on the GPU + real-data latency/jitter over LSL
+```

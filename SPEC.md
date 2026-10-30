@@ -194,3 +194,64 @@ measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default bui
 7. Torch on Windows: the default PyPI wheel is CPU-only (as far as I know); install a CUDA
    build first (README says how). With a CPU-only torch the GPU tests fail under
    `make test` rather than silently skipping.
+
+## 11. Phase 2: real EEG (BCI Competition IV 2a) and LSL
+
+Stop point set by the requester: **LSL integration and the real-data benchmark only. The closed-loop
+dashboard (cursor, sample-to-action latency) is not part of this phase.** No ICA.
+
+**Dataset.** BCI Competition IV dataset 2a via MOABB 1.7.2 (`BNCI2014_001`, `artifact_handling="annotate"`):
+9 subjects, 2 sessions each (`0train` = T, `1test` = E, different days), 6 runs of 48 trials (12 per
+class), 22 EEG + 3 EOG channels at 250 Hz, 0.5–100 Hz band-pass plus 50 Hz notch, experts' artifact flag
+per trial. Trial timing (official description): fixation at t = 0, cue at t = 2 s, motor imagery until
+t = 6 s. In MOABB's raw data each class annotation starts at the **cue** and lasts 4 s (verified
+empirically: decoding is at chance for windows before the annotation and peaks for windows starting
+1 s after it). Classes: left hand, right hand, feet, tongue.
+
+**Protocol (subject-specific, session T → session E, as in the competition).**
+* Decoder: the existing pipeline (FIR 8–30 Hz → covariance → tangent space → LDA), 22 channels, 4 classes,
+  trained per subject on all session-T trials (artifact-flagged trials included; no artifact removal).
+  Training windows: 500 samples (2 s) starting 0.0, 0.25 … 2.0 s after the cue (9 per trial, all inside the
+  imagery period). The EOG channels are **not** used for decoding (the competition forbids it); they are
+  used only for the noise log.
+* Evaluation: session E recordings are streamed run by run as 64-sample chunks through a fresh ring buffer
+  and the same `GPUPipeline` used for the latency work (CPU device when no GPU); every chunk gets a label
+  from its latest 500-sample window.
+* **Fixed-latency metric (the deployable number):** the prediction of the chunk whose window ends 3.06 s
+  after the cue (bin 10 of the 256 ms grid that starts 0.5 s after the cue; window = 1.06–3.06 s after the
+  cue). Chosen from session-T cross-validation of subject 1 (decoding peaks for windows starting ~1 s after
+  the cue) and fixed for every subject; no per-subject tuning on E.
+* **Peak metric (competition-style):** kappa as a function of time after the cue (one point per 256 ms
+  chunk, over artifact-free trials); the maximum over time. The competition ranked entries by "the largest
+  kappa value" of this time course, so this is the like-for-like comparison with 0.57, and it is
+  optimistic by construction (the best time point is chosen on the evaluation data).
+* Both metrics are reported on artifact-free trials (the competition's evaluation set) and on all trials.
+  Also reported: 2-class (left vs right) accuracy/kappa from the same 4-class scores.
+* Kappa = unweighted Cohen's kappa (`sklearn.metrics.cohen_kappa_score`).
+
+**Comparison target.** Kai Keng Ang et al. won dataset 2a with filter-bank CSP: mean kappa **0.57**
+(per subject 0.68, 0.42, 0.75, 0.48, 0.40, 0.27, 0.77, 0.75, 0.61; bbci.de results page). Correction to
+the brief: BCI Competition IV ran in **2008** (results announced 12 Dec 2008); 2012 is the year of the
+review article and of the journal version of the winning method. Differences that make the comparison
+approximate: the competition scored a causal sample-by-sample output, we score 256 ms chunk decisions;
+their classifier saw the whole recording history causally, ours a 2 s window.
+
+**Noise log.** For each trial, over the decision window: EEG peak-to-peak (95th percentile over channels,
+µV), fraction of EEG samples with |x| > 100 µV, EOG RMS (µV), fraction of power above 30 Hz, and the experts'
+artifact flag. Written to CSV; accuracy is also split by flag. Artifacts are logged, not removed.
+
+**LSL.** `pylsl` outlet in a **separate process** streaming 64-sample float32 chunks at 1× real time; an
+inlet in the consumer process pulls chunks into the ring buffer. Producer timestamp = `local_clock()` at
+push. Per chunk the consumer records `t_pull` and `t_ring` (after `ring.write`). Definitions:
+* **Transport delay** `d = t_ring − timestamp (+ time_correction)`; **jitter = standard deviation of d**.
+  The test asserts jitter < 1 ms. Also reported: p99 − p50 of d, max, and the producer's schedule jitter
+  (std of timestamp interval − 256 ms).
+* Same machine (loopback) only: this says nothing about network jitter. Inlet post-processing is off
+  (`processing_flags = 0`), so liblsl's de-jitter smoothing does not flatter the measurement.
+
+**Real-data latency.** A paced (1× real time) run of 1000 chunks of real recordings arriving **through LSL**
+into the ring buffer and the GPU pipeline, so the p99 label latency and the LSL jitter are measured in the
+same run. Run on the GPU machine.
+
+**Dependencies.** `moabb`, `mne` (pulled by moabb) and `pylsl` as the `real` extra. The synthetic path does
+not import them.
