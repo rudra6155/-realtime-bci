@@ -75,7 +75,7 @@ mutual information, LDA. It was chosen by cross-validation on session T only (ro
 error over the nine subjects 0.018 / 0.017, at or above it on 6 of 9 subjects, r = 0.97 with the winner's per-subject kappas. It is clearly better than
 my earlier decoders (+0.082 over the previous one, better on all 9 subjects). The comparison is approximate (the competition scored a sample-by-sample causal output
 and took the best time point; BCI Competition IV was held in **2008**). **Disclosure:** this second round was started because the first round's session-E
-score (0.505) was below 0.57; session E influenced whether to try again, never which candidate was chosen. Artifacts are logged, not removed (no ICA):
+score (0.505) was below 0.57; session E influenced whether to try again, never which candidate was chosen. No artifact removal of any kind: no ICA or regression, and the EOG channels are not used for decoding. Scores are on the experts' artifact-free trials (the competition's evaluation set); with the flagged trials included kappa is 0.585 / 0.594. Artifacts are logged, not removed:
 8.6% of evaluation trials are expert-flagged and decode at 0.60 accuracy vs 0.70 for clean trials. Detail, per-subject tables and caveats:
 [FINDINGS.md](FINDINGS.md) §6 (first version), §8 (Riemannian + smoothing) and §9 (filter-bank CSP); figure `results/real/kappa_vs_competition.png`.
 
@@ -85,7 +85,7 @@ score (0.505) was below 0.57; session E influenced whether to try again, never w
 chunks run 4× slower in the covariance and classifier stages in three of the five runs; FINDINGS §7.1; `python -m bci.tail_diag` is the tool for finding
 out), so don't quote one number. **The filter-bank decoder (current default), one run of 1000 chunks over LSL on the same laptop:** median label latency **4.1 ms**, p99 **6.5 ms**, slowest chunk 14.0 ms, **LSL jitter 0.084 ms**
 (`results/real_gpu_fbcsp/`; decoder inferred from the stage profile; no slow-chunk tail in this run, which one run cannot explain; FINDINGS §10). A separate `bci.tail_diag` run (in-process stream, no LSL) read a median of 3.45 ms with no slow
-chunks; that is a different tool and not comparable. **Its accuracy has not been confirmed on the GPU:** the accuracy files in that folder are the Riemannian decoder's (FINDINGS §10.2), so 0.587 / 0.598 are from the container's CPU. Loopback only: no network jitter. These are compute latencies; the decoder's 2 s
+chunks; that is a different tool and not comparable. **Its accuracy was reproduced on the GPU:** the 9-subject console output equals the container's at 3 decimals (kappa 0.587 / 0.598); only that console text is in the repo (`results/real_gpu_fbcsp_accuracy/`), and the accuracy files in `results/real_gpu_fbcsp/` are the Riemannian decoder's (FINDINGS §9.2, §10.2). Loopback only: no network jitter. These are compute latencies; the decoder's 2 s
 window means a label trails the user's intent by about two seconds.
 
 ```bash
@@ -212,5 +212,5 @@ and the repo's `Dockerfile` builds unmodified and runs on CPU in a sandbox (CLAI
 ## Limitations
 
 The latency benchmark is on synthetic data; real-data results are a replay of one public dataset; no artifact removal; the dashboard assumes an ideal network; one laptop and
-one software stack were measured; the filter-bank decoder's latency was measured once on the GPU but its accuracy there is unconfirmed; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
+one software stack were measured; the filter-bank decoder's latency was measured once on the GPU and its accuracy was reproduced there by console output only; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
 never run.

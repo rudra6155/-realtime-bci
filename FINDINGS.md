@@ -587,7 +587,12 @@ All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right ka
 * The mean kappa time course now peaks at the fixed bin: 0.587 at 3.06 s, 0.579 at 3.32 s, 0.573 at 2.80 s (the fixed
   bin was set a priori in phase 2 and not changed).
 * Flagged trials still decode worse: accuracy 0.603 (224 flagged) vs 0.697 clean.
-
+* **Reproduced on the GPU (console output).** The 9-subject run on the RTX 4060 laptop printed the same fixed-window kappa, best-time-point kappa and left-vs-right accuracy
+  for every subject, and the same means (accuracy 0.690, kappa 0.587 / 0.598, left-vs-right 0.817 / 0.634), as the container's CPU run: 27 values and 5 means equal at 3 decimals
+  (script comparison; `results/real_gpu_fbcsp_accuracy/console_paste.txt`). Only the console text exists: the run's CSV, chart and log files were not pushed, and the paste omits
+  per-subject accuracy, peak time, artifact counts and the all-trials line.
+* **No artifact removal of any kind.** No ICA, no regression, no rejection; the EOG channels are not used for decoding (they feed only the noise log). The scores are on the experts'
+  artifact-free trials, the competition's evaluation set; with the flagged trials included kappa is 0.585 (fixed) / 0.594 (best).
 ### 9.3 What this does and does not show
 
 * **Disclosure.** Round 2 was started because round 1's session-E score (0.505) was below 0.57. Session E therefore
@@ -597,8 +602,8 @@ All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right ka
 * The comparison with 0.57 stays approximate (FINDINGS §6.2): the competition scored a causal sample-by-sample output;
   here a decision per 256 ms chunk from a 2 s window plus a 4-chunk mean, and both numbers use a best time point chosen on E.
 * One dataset, 9 subjects, replayed recordings, no artifact removal, no person or amplifier.
-* The 0.587 / 0.598 come from the container's CPU and **the GPU has not confirmed them**: the accuracy files that were pushed as
-  the filter-bank GPU results are the Riemannian decoder's (§10.2). The streaming code is checked against a CPU reference by a test
+* The 0.587 / 0.598 were computed in the container's CPU and **reproduced on the GPU as console output** (§9.2); the raw GPU files were not pushed, and the accuracy files
+  that were pushed in `results/real_gpu_fbcsp/` are the Riemannian decoder's (§10.2). The streaming code is checked against a CPU reference by a test
   that also exists for CUDA; it has not been seen passing on the GPU. Latency on the RTX 4060 was measured once with the filter-bank
   decoder (§10.1: p50 4.08, p99 6.48 ms); on the container's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms
   (filter-bank) against 2.18 / 16.74 ms (Riemannian), one run each.
@@ -653,9 +658,9 @@ a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` poin
 
 ### 9.7 Open after phase 4
 
-1. Still to run on the RTX 4060: the phase-4 test suite (the CUDA variant of the filter-bank equivalence test), the 9-subject accuracy run with the
-   filter-bank decoder (`real_benchmark accuracy --decoder fbcsp --device cuda`, see `results/real_gpu_fbcsp/README.md`), and its sample-to-action in the
-   dashboard engine. Done once: its real-data latency over LSL (§10.1).
+1. Still to do on the RTX 4060: run the phase-4 test suite (the CUDA variant of the filter-bank equivalence test), push the raw files of the accuracy run (only its
+   console output is in the repo), and measure the filter-bank decoder's sample-to-action in the dashboard engine. Done: its real-data latency over LSL (§10.1) and
+   its 9-subject accuracy by console output (§9.2).
 2. The tail diagnostic runs of §9.5 (cause of the slow chunks).
 3. A real Hugging Face Space and `docker run --gpus all`.
 4. Beyond this project's reach from the container: any real amplifier or participant.
@@ -688,7 +693,8 @@ of 6.0 ms; that moves arrival times, not the compute time measured here.
   `bci.tail_diag` now writes the decoder into its summary header.
 * **`results/real_gpu_fbcsp/` holds the Riemannian decoder's accuracy files.** Its `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv` are identical to `results/real/riemann_k4/` apart
   from line endings (kappa 0.505 / 0.523, accuracy 0.629), whereas the filter-bank decoder scored 0.587 / 0.598 in the container. So the filter-bank decoder's accuracy has **not** been checked on the GPU;
-  `results/real_gpu_fbcsp/README.md` says which files are which and gives the command that produces the missing result.
+  `results/real_gpu_fbcsp/README.md` says which files are which. **Update:** the missing accuracy run was done later and its console output matches the container's filter-bank
+  result (§9.2); its raw files are still not in the repo.
 
 ### 10.3 What can and cannot be said
 
@@ -702,3 +708,8 @@ of 6.0 ms; that moves arrival times, not the compute time measured here.
   (SPEC.md §13.4, §9.5). `--no-telemetry` is the one to run first: it tests whether the polling in run 6 changed the median.
 * For the project's latency target none of this changes the outcome: p99 is under 50 ms in all six benchmark runs (10.2–26.0 ms Riemannian; 6.5 ms in the one filter-bank run), so the margin is 1.9× to
   7.7×, and the number to quote is the range, not one run.
+
+### 10.4 Status of the tail investigation at this commit
+
+`bci.tail_diag` has been run **once** on the GPU (run 6: no slow chunks, so nothing to compare); it has not been repeated and none of the A/B switches (`--no-gc`,
+`--priority high`, `--no-telemetry`) has been run. The cause of the slow chunks of runs 1–3 is therefore still open (CLAIMS P24, P34, P40).
