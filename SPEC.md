@@ -141,7 +141,8 @@ in FINDINGS.md rather than assumed. The hot path uses PyTorch; ONNX is the parit
 Streamlit. The engine (stream → ring buffer → pipeline at 1× real time) runs in its **own
 process** (`ProcessEngine`, started with `subprocess`, snapshots over an authenticated
 localhost connection); a periodic Streamlit fragment polls the latest snapshot and renders:
-a) scrolling 64-channel raw EEG, b) predicted class, c) rolling p99-latency gauge.
+a) scrolling raw EEG, b) predicted class, c) rolling p99-latency gauge. Since phase 3 it also shows the
+closed-loop cursor and sample-to-action latency and can replay the real recordings (§12).
 A separate process is used because building Plotly figures in the same process holds the GIL
 and stalls the pipeline thread, which would inflate the very latency the gauge displays
 (`scripts/ui_contention.py`; numbers in FINDINGS.md). It shows the device it is running on. On a CPU-only host (e.g. a free Hugging Face Space)
@@ -197,8 +198,8 @@ measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default bui
 
 ## 11. Phase 2: real EEG (BCI Competition IV 2a) and LSL
 
-Stop point set by the requester: **LSL integration and the real-data benchmark only. The closed-loop
-dashboard (cursor, sample-to-action latency) is not part of this phase.** No ICA.
+Stop point set by the requester for this phase: **LSL integration and the real-data benchmark only**; the
+closed-loop dashboard and the decoder selection that followed are §12. No ICA.
 
 **Dataset.** BCI Competition IV dataset 2a via MOABB 1.7.2 (`BNCI2014_001`, `artifact_handling="annotate"`):
 9 subjects, 2 sessions each (`0train` = T, `1test` = E, different days), 6 runs of 48 trials (12 per
@@ -212,7 +213,8 @@ empirically: decoding is at chance for windows before the annotation and peaks f
 * Decoder: the existing pipeline (FIR 8–30 Hz → covariance → tangent space → LDA), 22 channels, 4 classes,
   trained per subject on all session-T trials (artifact-flagged trials included; no artifact removal).
   Training windows: 500 samples (2 s) starting 0.0, 0.25 … 2.0 s after the cue (9 per trial, all inside the
-  imagery period). The EOG channels are **not** used for decoding (the competition forbids it); they are
+  imagery period). This is the **baseline** decoder (no temporal smoothing); §12.2 selects the smoothing used
+  afterwards. The EOG channels are **not** used for decoding (the competition forbids it); they are
   used only for the noise log.
 * Evaluation: session E recordings are streamed run by run as 64-sample chunks through a fresh ring buffer
   and the same `GPUPipeline` used for the latency work (CPU device when no GPU); every chunk gets a label
@@ -255,3 +257,58 @@ same run. Run on the GPU machine.
 
 **Dependencies.** `moabb`, `mne` (pulled by moabb) and `pylsl` as the `real` extra. The synthetic path does
 not import them.
+
+## 12. Phase 3: closed-loop dashboard and decoder selection
+
+Requested after phase 2: (1) the closed-loop dashboard, (2) close the kappa gap using only changes selected
+on **session T**. Checking the Docker / Hugging Face deployment was deferred by the requester.
+
+### 12.1 Closed loop
+
+* **Sources.** `synthetic` (2 classes, 64 channels, as before) or `real`: BCI Competition IV 2a session E of a
+  chosen subject, replayed at 1× real time through the same ring buffer and `GPUPipeline`, with the decoder
+  trained on that subject's session T. The ring buffer is reset at every run start (a window never spans two
+  runs) and the replay restarts after the last run, so the loop is a replay of recordings, not a continuous
+  recording.
+* **Decision.** One per 256 ms chunk once the ring holds the 500-sample window. With smoothing `k` the score
+  vector is the mean of the last `k` chunk score vectors (causal; reset at run starts); the decision is its argmax.
+  Default `k`: 1 for synthetic, 4 for real (§12.2; `DEFAULT_SMOOTH_K`).
+* **Cursor.** Position `x` in [−1, 1], starts at 0, and is a pure integrator: each decision of *Left Hand*
+  subtracts 0.1, *Right Hand* adds 0.1, any other class (feet, tongue) leaves it unchanged; clipped at ±1.
+* **Sample-to-action latency.** From the instant the newest sample used by the decision existed (the chunk's
+  completion time, `Chunk.t_emit_ns`) to the instant the new cursor position has been computed. It contains
+  stream hand-over, ring-buffer write, H2D copy, filter, covariance, `eigh`, classifier, D2H copy, smoothing and
+  the controller update. It does **not** contain the window length (a label trails the user's intent by about
+  the 2 s window plus the smoothing delay), the browser, or the screen.
+* **Sample-to-render** is estimated on the server (action time → the moment the page's poll reads it); it adds
+  the poll period (≤ 250 ms). Browser paint is **not** measured.
+* **Intent agreement** (live indicator, not an evaluation metric): share of the last up-to-100 chunks whose true
+  intent is left or right hand where the decision equals the intent. Chunks just after an intent change count
+  too, so it understates steady-state accuracy.
+
+### 12.2 Decoder selection on session T only
+
+`python -m bci.real_benchmark select` never loads session E.
+* **Candidates (24):** bands = {one band 8–30 Hz; four bands 6–10, 10–14, 14–22, 22–32 Hz with the tangent
+  features concatenated} × window = {500, 750 samples} × smoothing `k` = {1, 2, 3, 4, 6, 8} chunks. Training
+  windows start every 0.25 s from the cue and end inside the 4 s imagery period (9 starts for 500 samples,
+  5 for 750).
+* **Score:** leave-one-run-out cross-validation over the 6 runs of session T (LDA, automatic shrinkage, fitted
+  on 5 runs); Cohen's kappa of the decision at the fixed bin (3.06 s after the cue) on the artifact-free
+  trials; mean over the 9 subjects. The tangent-space reference mean is computed once from one window per
+  trial of **all** session-T runs (no labels, but it includes the held-out run's windows); the deployed `fit`
+  uses every training window.
+* **Rule** (written into `select_config` before the 24-candidate table was computed): take the candidate with the
+  highest mean kappa; every candidate whose mean paired per-subject difference to it is ≤ 1 paired standard
+  error is "indistinguishable"; among those choose the simplest in the order (number of bands, window
+  length, `k`).
+* An earlier exploratory pass (scratch scripts, not in the repo) screened more band layouts and covariance
+  shrinkage values on session T only; the list above is what was kept after looking at those session-T
+  numbers, so the session-T figure of the chosen candidate is optimistically biased by that screening.
+  Session E played no part.
+
+### 12.3 Session-E evaluation of the selected decoder
+
+One run over the 9 subjects with the protocol of §11 and the selected smoothing; the fixed bin is unchanged.
+The phase-2 baseline (no smoothing) is kept in `results/real/baseline_k1/` for comparison. No other
+configuration was evaluated on session E.

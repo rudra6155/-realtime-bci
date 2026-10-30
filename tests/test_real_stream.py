@@ -116,6 +116,23 @@ def test_trial_mapping_and_metrics_exclude_artifact_trials():
     assert m["kappa_peak_clean"] == pytest.approx(1.0) and m["acc_lr_fixed_clean"] == pytest.approx(1.0)
 
 
+def test_stream_session_smoothing_is_a_causal_mean_restarted_at_each_run():
+    from bci.classifier import fit
+    rng = np.random.default_rng(1)
+    params = fit(rng.standard_normal((40, 500, 22)) * 10, np.arange(40) % 4, class_names=("a", "b", "c", "d"))
+    rec = fake_recording()
+    raw = rb.stream_session(params, rec, "cpu", smooth_k=1)
+    smooth = rb.stream_session(params, rec, "cpu", smooth_k=3)
+    for r in raw:
+        ends1, s1 = raw[r]
+        ends3, s3 = smooth[r]
+        np.testing.assert_array_equal(ends1, ends3)
+        expected = np.stack([s1[max(0, i - 2):i + 1].mean(axis=0) for i in range(len(s1))])
+        np.testing.assert_allclose(s3, expected, atol=1e-9)
+    first_of_run1 = smooth[1][1][0]                                   # the average restarts: nothing carries over from run 0
+    np.testing.assert_allclose(first_of_run1, raw[1][1][0], atol=1e-9)
+
+
 def test_kappa_is_zero_for_chance_level_constant_predictions():
     rec = fake_recording()
     scores, labels, art, _ = rb.trial_bin_scores(rec, _perfect_preds(rec))

@@ -24,6 +24,7 @@ from sklearn.metrics import cohen_kappa_score
 
 from . import CHUNK_SAMPLES, LATENCY_TARGET_MS, WINDOW_SAMPLES
 from .classifier import RiemannianLDAParams, fit
+from .closed_loop import DEFAULT_SMOOTH_K, ScoreSmoother
 from .gpu_pipeline import GPUPipeline, device_label, drive, environment_info, resolve_device, STAGES
 from .ring_buffer import RingBuffer
 from .stream import (BCICIV2A_CLASSES, Chunk, RealEEGStream, Recording, load_bciciv2a, noise_level)
@@ -64,16 +65,19 @@ def train_subject(subject: int, rec_train: Recording | None = None) -> Riemannia
 
 # ----------------------------------------------------------------------------------- streaming evaluation
 def stream_session(params: RiemannianLDAParams, rec: Recording, device: str = "auto",
-                   compile: bool | str = False) -> dict[int, tuple[np.ndarray, np.ndarray]]:
+                   compile: bool | str = False, smooth_k: int = 1) -> dict[int, tuple[np.ndarray, np.ndarray]]:
     """Run every run of ``rec`` through ring buffer + pipeline. Returns ``{run: (end_samples, scores)}`` where
-    ``end_samples[i]`` is the (exclusive) sample index at which decoded window i ends within the run."""
+    ``end_samples[i]`` is the (exclusive) sample index at which decoded window i ends within the run and ``scores``
+    are the decision scores: the mean of the last ``smooth_k`` chunk scores (causal; reset at every run start)."""
     n_ch = rec.runs[0].eeg.shape[1]
     pipe = GPUPipeline(params, device, n_channels=n_ch, compile=compile)
     out = {}
     for r in range(len(rec.runs)):
         ring = RingBuffer(n_channels=n_ch)                 # fresh buffer per run: no window crosses a run boundary
+        smoother = ScoreSmoother(smooth_k)
         results = list(drive(pipe, ring, RealEEGStream(recording=rec, runs=[r]), lookahead=False))
-        out[r] = (np.array([(res.index + 1) * CHUNK_SAMPLES for res in results]), np.stack([res.scores for res in results]))
+        out[r] = (np.array([(res.index + 1) * CHUNK_SAMPLES for res in results]),
+                  np.stack([smoother.update(res.scores) for res in results]))
     return out
 
 
@@ -149,14 +153,14 @@ def parse_subjects(text: str) -> list[int]:
     return out
 
 
-def run_accuracy(subjects: list[int], device: str, out_dir: Path) -> list[dict]:
+def run_accuracy(subjects: list[int], device: str, out_dir: Path, smooth_k: int = 1) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     per_subject, tc_rows, noise_rows = [], [], []
     for s in subjects:
         t0 = time.time()
         params = train_subject(s)
         rec_e = load_bciciv2a(s, "1test")
-        preds = stream_session(params, rec_e, device)
+        preds = stream_session(params, rec_e, device, smooth_k=smooth_k)
         scores, labels, art, _ = trial_bin_scores(rec_e, preds)
         m = evaluate(scores, labels, art)
         correct = scores[:, FIXED_BIN].argmax(axis=1) == labels
@@ -280,6 +284,88 @@ def run_latency(subject: int, device: str, chunks: int, warmup: int, out_dir: Pa
     return summ
 
 
+# ----------------------------------------------------------------------------------- model selection (session T only)
+SELECT_BANDS = {"b8_30": (8, 30, 101), "b6_10": (6, 10, 201), "b10_14": (10, 14, 201),
+                "b14_22": (14, 22, 151), "b22_32": (22, 32, 151)}        # (low Hz, high Hz, FIR taps)
+SELECT_CONFIGS = {"base 8-30": ("b8_30",), "4 bands": ("b6_10", "b10_14", "b14_22", "b22_32")}
+SELECT_WINDOWS = (500, 750)                                               # samples (2 s, 3 s)
+SELECT_K = (1, 2, 3, 4, 6, 8)                                             # chunks averaged
+
+
+def _select_subject(subject: int) -> dict:
+    """Leave-one-run-out CV on session T: decision scores at all 16 time bins for every trial, per config/window."""
+    from scipy.signal import firwin
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from . import classifier as C
+    from .filters import bandpass_cpu
+    rec = load_bciciv2a(subject, "0train")
+    fs, out = rec.fs, {}
+    for win in SELECT_WINDOWS:
+        starts = np.arange(0.0, (4.0 - win / fs) + 1e-9, 0.25)           # training windows lie inside the 4 s imagery period
+        tr_w, tr_y, tr_run, ev_w = [], [], [], []
+        for r, run in enumerate(rec.runs):
+            for cue, lab in zip(run.cue_samples, run.labels):
+                for st in starts:
+                    a = int(cue) + int(round(st * fs)); tr_w.append(run.eeg[a:a + win])
+                tr_y += [int(lab)] * len(starts); tr_run += [r] * len(starts)
+                for j in range(N_BINS):
+                    end = int(round((int(cue) + int(round(fs * (BIN_FIRST_END_S + j * BIN_S)))) / CHUNK_SAMPLES)) * CHUNK_SAMPLES
+                    ev_w.append(run.eeg[end - win:end])
+        tr_w, ev_w, tr_y, tr_run = np.stack(tr_w), np.stack(ev_w), np.array(tr_y), np.array(tr_run)
+        ns = len(starts); n_tr = len(tr_y) // ns
+        trial_y, trial_run = tr_y[::ns], tr_run[::ns]
+        feats = {}
+        for bk, (lo, hi, nt) in SELECT_BANDS.items():
+            taps = firwin(nt, [lo, hi], pass_zero=False, fs=fs, window="hamming")
+            ctr = C.covariance_cpu(bandpass_cpu(tr_w, taps), 0.05); cev = C.covariance_cpu(bandpass_cpu(ev_w, taps), 0.05)
+            ris = C._sym_fn(C.riemann_mean(ctr[::ns]), lambda w: w ** -0.5)
+            feats[bk] = (C.tangent_cpu(ctr, ris), C.tangent_cpu(cev, ris))
+        for name, keys in SELECT_CONFIGS.items():
+            ftr = np.hstack([feats[k][0] for k in keys]); fev = np.hstack([feats[k][1] for k in keys])
+            scores = np.zeros((n_tr, N_BINS, 4))
+            for held in sorted(set(trial_run.tolist())):
+                tr = tr_run != held; idx = np.where(trial_run == held)[0]
+                lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto").fit(ftr[tr], tr_y[tr])
+                ev_idx = (idx[:, None] * N_BINS + np.arange(N_BINS)[None]).ravel()
+                scores[idx] = lda.decision_function(fev[ev_idx]).reshape(len(idx), N_BINS, 4)
+            out[(name, win)] = scores
+    art = np.array([bool(a) for run in rec.runs for a in run.artifact])
+    return {"scores": out, "labels": trial_y, "artifact": art}
+
+
+def select_config(subjects: list[int], workers: int = 4) -> list[dict]:
+    """Choose the decoder configuration by cross-validation on session T only (session E is never loaded).
+
+    Decision rule, fixed before looking at any result: pick the configuration with the highest mean kappa at the
+    fixed decision bin; if simpler configurations are statistically indistinguishable from it (mean paired
+    per-subject difference <= 1 paired standard error), pick the simplest, where simplicity is the ascending order
+    of (number of bands, window length, smoothing k)."""
+    from multiprocessing import Pool
+    with Pool(min(workers, len(subjects))) as pool:
+        data = pool.map(_select_subject, subjects)
+    cands = [(n, w, k) for n in SELECT_CONFIGS for w in SELECT_WINDOWS for k in SELECT_K]
+
+    def kappa(d: dict, c: tuple) -> float:
+        sm = d["scores"][(c[0], c[1])][:, max(0, FIXED_BIN - c[2] + 1):FIXED_BIN + 1].mean(axis=1)
+        m = ~d["artifact"]
+        return float(cohen_kappa_score(d["labels"][m], sm[m].argmax(1)))
+
+    per = {c: np.array([kappa(d, c) for d in data]) for c in cands}
+    best = max(cands, key=lambda c: per[c].mean())
+    rows = []
+    for c in cands:
+        diff = per[best] - per[c]
+        se = float(diff.std(ddof=1) / np.sqrt(len(diff))) if len(diff) > 1 else 0.0
+        rows.append({"config": c[0], "n_bands": len(SELECT_CONFIGS[c[0]]), "window_samples": c[1], "smooth_k": c[2],
+                     "mean_kappa_T_cv": float(per[c].mean()), "diff_to_best": float(diff.mean()), "paired_se": se,
+                     "indistinguishable": bool(diff.mean() <= se)})
+    ok = [r for r in rows if r["indistinguishable"]]
+    chosen = min(ok, key=lambda r: (r["n_bands"], r["window_samples"], r["smooth_k"]))
+    for r in rows:
+        r["chosen"] = r is chosen
+    return rows
+
+
 # ----------------------------------------------------------------------------------- alignment check
 def offset_check(subject: int = 1, starts_s=tuple(np.arange(-2.0, 6.01, 1.0))) -> list[tuple[float, float]]:
     """Cross-validated (5-fold, session T) 4-class accuracy of a 2 s window starting ``start`` seconds after the
@@ -340,9 +426,28 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--chunks", type=int, default=1000)
         sp.add_argument("--warmup", type=int, default=50)
         sp.add_argument("--allow-cpu", action="store_true", help="latency on a CPU device (smoke test; files get a cpu_smoke_ prefix)")
+        sp.add_argument("--smooth-k", type=int, default=DEFAULT_SMOOTH_K["real"],
+                        help="accuracy: decision = mean of the last k chunk scores (default: the value chosen by 'select' on session T)")
+    se = sub.add_parser("select", help="choose the decoder configuration by CV on session T only (never loads session E)")
+    se.add_argument("--subjects", default="1-9")
+    se.add_argument("--workers", type=int, default=4)
+    se.add_argument("--out-dir", default="results/real")
     oc = sub.add_parser("offset-check", help="CV accuracy vs window offset after the annotation (cue alignment check)")
     oc.add_argument("--subject", type=int, default=1)
     args = p.parse_args(argv)
+    if args.cmd == "select":
+        rows = select_config(parse_subjects(args.subjects), args.workers)
+        out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
+        _write_csv(out / "model_selection_T.csv", rows)
+        print("session-T leave-one-run-out kappa at the fixed bin (mean over subjects); rows: config/window, columns: k")
+        for n in SELECT_CONFIGS:
+            for w in SELECT_WINDOWS:
+                print(f"  {n:10s} {w:4d} " + "".join(f"  k={r['smooth_k']}: {r['mean_kappa_T_cv']:.3f}" for r in rows
+                                                     if r["config"] == n and r["window_samples"] == w))
+        c = next(r for r in rows if r["chosen"])
+        print(f"\nchosen by the pre-declared rule: {c['config']}, window {c['window_samples']} samples, smooth k={c['smooth_k']} "
+              f"(T-CV kappa {c['mean_kappa_T_cv']:.3f})")
+        return 0
     if args.cmd == "offset-check":
         print(f"subject {args.subject}, session T: 5-fold CV 4-class accuracy of a 2 s window starting at offset (s) after the annotation (chance 0.25)")
         for st, acc in offset_check(args.subject):
@@ -351,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out_dir)
     status = 0
     if args.cmd in ("accuracy", "all"):
-        per_subject = run_accuracy(parse_subjects(args.subjects), args.device, out)
+        per_subject = run_accuracy(parse_subjects(args.subjects), args.device, out, args.smooth_k)
         _print_accuracy(per_subject)
     if args.cmd in ("latency", "all"):
         if resolve_device(args.device).type != "cuda" and not args.allow_cpu:

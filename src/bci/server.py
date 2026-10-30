@@ -34,15 +34,20 @@ class _Engine(Protocol):
 
 def _public(snap: dict, include_raw: bool = False) -> dict:
     """JSON-safe subset of an engine snapshot."""
+    names = tuple(snap.get("class_names", CLASS_NAMES))
     label, true_label = snap["label"], snap["true_label"]
     out = {
         "frames": snap["frames"], "starting": snap["starting"], "warming_up": snap["warming_up"],
-        "label": label, "label_name": None if label is None else CLASS_NAMES[label],
-        "true_label": true_label, "true_label_name": None if true_label is None else CLASS_NAMES[true_label],
+        "label": label, "label_name": None if label is None else names[label],
+        "true_label": true_label,
+        "true_label_name": None if true_label is None or true_label < 0 else names[true_label],
+        "class_names": list(names), "source": snap.get("source", "synthetic"), "subject": snap.get("subject", 1),
         "scores": None if snap["scores"] is None else [float(v) for v in snap["scores"]],
         "latency_ms": snap["latency_ms"],
         "percentiles": snap["percentiles"],
         "stage_ms": snap["stage_ms"],
+        "cursor": snap.get("cursor"), "sample_to_action_ms": snap.get("s2a_last_ms"),
+        "sample_to_action_percentiles": snap.get("s2a"), "intent_agreement": snap.get("agreement"),
         "device": snap["device"], "pipeline": snap["pipeline"], "filter": snap["filter"],
         "ring": snap["ring"], "running": snap["running"], "error": snap["error"],
     }

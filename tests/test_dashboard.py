@@ -74,6 +74,11 @@ def _frames(page) -> int:
     return int(re.search(r"Chunks processed: (\d+)", text).group(1))
 
 
+def _cursor_x(page) -> float:
+    text = page.get_by_text(re.compile(r"Cursor x = [+-]\d\.\d\d")).first.inner_text()
+    return float(re.search(r"Cursor x = ([+-]\d\.\d\d)", text).group(1))
+
+
 def test_dashboard_renders_and_updates(dashboard_url):
     with playwright_sync.sync_playwright() as p:
         browser = _launch_chromium(p)
@@ -93,6 +98,19 @@ def test_dashboard_renders_and_updates(dashboard_url):
         time.sleep(3)
         second = _frames(page)
         assert second > first, f"dashboard is not live: chunks processed {first} -> {second}"
+
+        # closed loop: the cursor moves with the decoded class and sample-to-action latency is shown
+        page.get_by_text("Closed loop: cursor").first.wait_for(timeout=60_000)
+        page.locator('[data-testid="stMetric"]', has_text="Sample-to-action, last").first.wait_for(timeout=30_000)
+        xs = set()
+        t_end = time.time() + 12
+        while time.time() < t_end:
+            xs.add(_cursor_x(page))
+            time.sleep(0.4)
+        assert len(xs) >= 2 and all(-1.0 <= x <= 1.0 for x in xs), f"cursor did not move: {xs}"
+        s2a = page.locator('[data-testid="stMetric"]', has_text="Sample-to-action, last").first.inner_text()
+        assert 0 < float(re.search(r"(\d+\.\d+) ms", s2a).group(1)) < 1000, s2a
+        assert page.locator("#bci-cursor").count() == 1
         assert page.locator('[data-testid="stException"]').count() == 0
         assert not errors, f"browser page errors: {errors}"
         assert page.get_by_text(re.compile(r"Device: ")).count() >= 1

@@ -7,10 +7,11 @@ pinned: false
 
 # realtime-bci
 
-A real-time, GPU-accelerated EEG decoding pipeline on **synthetic** data: a simulated 64-channel
-stream goes through a CPU ring buffer into pinned memory, then onto the GPU (two CUDA streams)
-for band-pass filtering, covariance, a Riemannian tangent-space map and an LDA classifier. A
-Streamlit dashboard shows the raw EEG, the predicted class and a live p99-latency gauge.
+A real-time, GPU-accelerated EEG decoding pipeline, benchmarked on a **synthetic** 64-channel stream and
+evaluated on the public BCI Competition IV 2a recordings (below). A stream goes through a CPU ring buffer
+into pinned memory, then onto the GPU (two CUDA streams) for band-pass filtering, covariance, a Riemannian
+tangent-space map and an LDA classifier. A Streamlit dashboard shows the raw EEG, the predicted class, a
+cursor driven by the decisions and a live p99-latency gauge.
 
 ## What this is / what this is NOT
 
@@ -18,9 +19,9 @@ Streamlit dashboard shows the raw EEG, the predicted class and a live p99-latenc
 streams, a `torch.compile`d vectorized filter, CPU/GPU correctness tests, an ONNX parity check,
 and a latency benchmark that measures from "chunk received" to "label ready".
 
-**This is not** a hardware-validated BCI. It has never seen a real EEG amplifier or a person.
-All data are synthetic, there is no artifact removal, and accuracy on this generator (0.865
-held-out) says nothing about accuracy on real EEG.
+**This is not** a hardware-validated BCI. It has never seen a real EEG amplifier or a person. The
+latency benchmark uses synthetic data (accuracy on that generator, 0.865 held-out, says nothing about
+real EEG); the real-data results below come from a public dataset, replayed, with no artifact removal.
 
 ## Latency (measured)
 
@@ -50,7 +51,7 @@ Two things to know before quoting these numbers:
 
 ![dashboard demo](results/dashboard_demo.gif)
 
-*Recorded on the RTX 4060 laptop: the page shows the device and a live rolling p99.* The decoder
+*Recorded on the RTX 4060 laptop, before the closed-loop view was added: the page shows the device and a live rolling p99.* The decoder
 uses the latest 2 s of data, so its label trails a change of simulated intent by up to ~2 s.
 
 ## Real EEG (BCI Competition IV 2a) and LSL
@@ -61,28 +62,53 @@ Per subject: train on session T, stream session E, score on the experts' artifac
 
 | | accuracy | Cohen's kappa |
 |---|---|---|
-| this pipeline, fixed window (deployable) | 0.592 | **0.456** |
-| this pipeline, best time point (competition-style) | | 0.510 |
+| this pipeline, fixed window (deployable) | 0.629 | **0.505** |
+| this pipeline, best time point (competition-style) | | 0.523 |
+| first version of this pipeline (no smoothing), fixed window / best time point | 0.592 | 0.456 / 0.510 |
 | 2008 competition winner (Ang et al., FBCSP) | | 0.57 |
 
-**It does not beat the winner.** It matches or beats it on S1 and S6, is far below on S2, S3, S5, S7, S8, and the
-two sets of per-subject kappas correlate at r = 0.88. The comparison is approximate (the competition scored a
-sample-by-sample causal output and took the best time point). BCI Competition IV was held in **2008**.
-Artifacts are logged, not removed (no ICA): 8.6% of evaluation trials are expert-flagged and decode at 0.52
-accuracy vs 0.60 for clean trials. Detail, per-subject table and caveats: [FINDINGS.md](FINDINGS.md) §6,
-figure `results/real/kappa_vs_competition.png`.
+The decoder is an 8–30 Hz band, a 2 s window and a mean over the last 4 chunk scores. That smoothing was
+chosen by cross-validation on session T only (24 candidates, `python -m bci.real_benchmark select`); session E
+was scored once with it.
 
-**LSL jitter** (std of producer timestamp → ring buffer delay, loopback, separate producer process) was
-**0.24 ms** in the test (limit 1 ms), 0.47 ms with the pipeline running on the same machine. These were measured
-on Linux; the GPU-machine run of the real-data latency and jitter is still to do (FINDINGS §7.1).
+**It still does not beat the winner** (0.065 below at the fixed window, 0.047 at the best time point). It is at or above it on S1, S6 and S9, far below on S2, S3, S5, S7, S8, and the
+two sets of per-subject kappas correlate at r = 0.91. The comparison is approximate (the competition scored a
+sample-by-sample causal output and took the best time point). BCI Competition IV was held in **2008**.
+Artifacts are logged, not removed (no ICA): 8.6% of evaluation trials are expert-flagged and decode at 0.59
+accuracy vs 0.63 for clean trials (0.52 vs 0.60 before smoothing). Detail, per-subject tables and caveats:
+[FINDINGS.md](FINDINGS.md) §6 (first version) and §8 (selected decoder), figure `results/real/kappa_vs_competition.png`.
+
+**On the RTX 4060 laptop** (real recordings arriving through LSL from a separate process, 1× real time,
+1000 chunks): **p99 label latency 10.3 ms** (target 50 ms) and **LSL jitter 0.053 ms** (std of producer
+timestamp → ring buffer delay; limit 1 ms; 0.097 ms in the test). The first version's accuracy and kappa were
+byte-identical on the Linux CPU container and on the GPU; the 0.505 / 0.523 above were computed in the
+container only. Loopback only: no network jitter. The 10 ms is compute
+latency; the decoder's 2 s window means a label trails the user's intent by about two seconds.
 
 ```bash
 pip install -e ".[dev]"                       # includes moabb + pylsl
-make benchmark-real                           # 9-subject accuracy/kappa, then real-data latency + LSL jitter (GPU) -> results/real/
+make benchmark-real                           # 9-subject accuracy/kappa (smoothing k=4), then real-data latency + LSL jitter (GPU) -> results/real/
+python -m bci.real_benchmark select           # the session-T-only choice of the decoder (about 4 min on 4 cores; never loads session E)
 make test-real                                # also runs the tests that download the dataset (~80 MB per subject)
 ```
 
-The closed-loop dashboard (cursor, sample-to-action latency) is **not implemented yet**.
+## Closed-loop dashboard
+
+`make dashboard` now shows a cursor that moves left/right with the decoded class (*Left Hand* −0.1, *Right Hand* +0.1 per
+decision, other classes hold, clipped at ±1), the live agreement with the intent, and **sample-to-action latency**:
+from the moment the newest sample of a decision existed (chunk complete) to the moment the new cursor position was
+computed. The sidebar switches between the synthetic stream and the real recordings (subject 1–9, session E replayed in a
+loop; needs `pip install -e ".[real]"` for MOABB).
+
+![closed-loop dashboard, real EEG](results/closed_loop_real_cpu.png)
+
+*Container, CPU device, real subject 1.* What is and is not established (FINDINGS §8.3, CLAIMS P18–P23):
+* Sample-to-action was **not measured on the GPU**. The CPU screenshots read p50 / p99 3.05 / 8.90 ms (real) and
+  4.66 / 16.40 ms (synthetic), one readout each; sample-to-render also includes the ≤ 250 ms page poll, and the
+  browser's paint is not measured.
+* Sample-to-action excludes the window: a label trails the user's intent by about 2 s plus 0.4 s of smoothing delay.
+* The cursor is an integrator and is pinned at +1.00 in the screenshot: it shows the decoder's direction, not a
+  calibrated control signal. The 52% intent agreement shown there is a short rolling window, not an accuracy.
 
 ## Quick start
 
@@ -156,12 +182,13 @@ Details and every decision: [SPEC.md](SPEC.md).
 ## Layout
 
 ```
-src/bci/    stream.py ring_buffer.py filters.py classifier.py gpu_pipeline.py server.py lsl_stream.py real_benchmark.py
+src/bci/    stream.py ring_buffer.py filters.py classifier.py gpu_pipeline.py server.py lsl_stream.py real_benchmark.py closed_loop.py
 app/        dashboard.py            Streamlit UI (Hugging Face Spaces entry point)
-tests/      test_ring_buffer.py test_correctness.py test_latency.py test_dashboard.py test_server.py test_profile_analysis.py test_real_stream.py test_lsl.py
+tests/      test_ring_buffer.py test_correctness.py test_latency.py test_dashboard.py test_server.py test_profile_analysis.py test_real_stream.py test_lsl.py test_closed_loop.py
 scripts/    run_benchmark.sh profile.py record_gif.py ui_contention.py
 results/    benchmark_*.csv, latency_histogram.png, profiler_*, dashboard_demo.gif   (from the GPU run)
-            real/  real-data accuracy, kappa time course, noise log, kappa chart (container CPU run)
+            real/  selected-decoder accuracy/kappa/noise log/chart + model_selection_T.csv (container CPU run), baseline_k1/ (first version), real latency (GPU run)
+            closed_loop_*_cpu.png  dashboard screenshots (container)
 gpu_run/    extra GPU runs (eager-filter A/B);  gpu_*.txt in the root: console logs of the GPU runs (UTF-16)
 ```
 
@@ -175,5 +202,5 @@ index). **Not deployed or tested on Spaces** (see CLAIMS.md C4).
 
 ## Limitations
 
-Synthetic data only; no artifact removal; the dashboard assumes an ideal network; one laptop and
+The latency benchmark is on synthetic data; real-data results are a replay of one public dataset; no artifact removal; the dashboard assumes an ideal network; one laptop and
 one software stack were measured; Docker, CI and Hugging Face deployment were never run.

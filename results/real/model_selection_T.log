@@ -1,0 +1,7 @@
+session-T leave-one-run-out kappa at the fixed bin (mean over subjects); rows: config/window, columns: k
+  base 8-30   500   k=1: 0.484  k=2: 0.495  k=3: 0.506  k=4: 0.517  k=6: 0.514  k=8: 0.474
+  base 8-30   750   k=1: 0.493  k=2: 0.481  k=3: 0.463  k=4: 0.438  k=6: 0.402  k=8: 0.350
+  4 bands     500   k=1: 0.450  k=2: 0.472  k=3: 0.492  k=4: 0.511  k=6: 0.536  k=8: 0.513
+  4 bands     750   k=1: 0.533  k=2: 0.520  k=3: 0.495  k=4: 0.475  k=6: 0.432  k=8: 0.355
+
+chosen by the pre-declared rule: base 8-30, window 500 samples, smooth k=4 (T-CV kappa 0.517)

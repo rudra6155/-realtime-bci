@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import time
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from bci.gpu_pipeline import ProcessEngine, _empty_snapshot
@@ -49,5 +51,27 @@ def test_process_engine_runs_pipeline_in_child_process():
         assert snap["percentiles"]["n"] > 0 and snap["label"] in (0, 1)
         assert snap["ring"]["dropped_samples"] == 0
         assert snap["raw"].shape[1] == 64 and snap["device"] == "CPU"
+        # closed loop: the cursor is driven by the decisions and sample-to-action latency is tracked
+        assert snap["cursor"] is not None and -1.0 <= snap["cursor"]["x"] <= 1.0
+        assert snap["s2a"]["n"] > 0 and 0 < snap["s2a"]["p50"] < 1000 and snap["s2a_last_ms"] > 0
+        assert snap["s2a"]["p50"] >= snap["percentiles"]["p50"] * 0.5      # it contains the pipeline latency, not less
+        assert snap["class_names"] == ("Left Hand", "Right Hand") and snap["source"] == "synthetic"
+    finally:
+        engine.stop()
+
+
+@pytest.mark.skipif(os.environ.get("BCI_RUN_REAL") != "1", reason="set BCI_RUN_REAL=1 (downloads the dataset via MOABB)")
+def test_process_engine_replays_real_eeg_with_four_classes():
+    from bci.stream import BCICIV2A_CLASSES
+    engine = ProcessEngine(device="cpu", source="real", subject=1, smooth_k=4).start()
+    try:
+        deadline = time.time() + 240
+        while time.time() < deadline and engine.snapshot()["frames"] < 25:
+            time.sleep(1)
+        snap = engine.snapshot()
+        assert snap["error"] is None, snap["error"]
+        assert snap["class_names"] == BCICIV2A_CLASSES and snap["n_channels"] == 22 and snap["raw"].shape[1] == 22
+        assert snap["source"] == "real" and snap["subject"] == 1 and snap["smooth_k"] == 4
+        assert snap["cursor"] is not None and snap["s2a"]["n"] > 0 and snap["label"] in range(4)
     finally:
         engine.stop()

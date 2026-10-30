@@ -40,8 +40,9 @@ from typing import Iterable, Iterator
 import numpy as np
 import torch
 
-from . import (CHUNK_SAMPLES, FS_HZ, LATENCY_TARGET_MS, N_CHANNELS, WINDOW_SAMPLES)
+from . import (CHUNK_SAMPLES, CLASS_NAMES, FS_HZ, LATENCY_TARGET_MS, N_CHANNELS, WINDOW_SAMPLES)
 from .classifier import RiemannianLDA, RiemannianLDAParams, train_default
+from .closed_loop import CursorController, RollingAgreement, ScoreSmoother
 from .filters import configure_precision, make_bandpass
 from .ring_buffer import RingBuffer
 from .stream import Chunk, SyntheticEEGStream
@@ -73,6 +74,8 @@ class Result:
 class Frame:
     chunk: Chunk
     result: Result | None            # None while the decode window is still filling
+    decision_label: int | None = None            # argmax of the (optionally smoothed) scores: what the cursor acts on
+    decision_scores: np.ndarray | None = None
 
 
 def resolve_device(device: str | torch.device = "auto") -> torch.device:
@@ -289,19 +292,55 @@ class LatencyTracker:
 
 
 class StreamingSession:
-    """stream -> ring buffer -> pipeline, one chunk per :meth:`step` (paced at 1x by default)."""
+    """stream -> ring buffer -> pipeline, one chunk per :meth:`step` (paced at 1x by default).
+
+    ``source="synthetic"``: the generated 64-channel stream, default 2-class model. ``source="real"``: session E of
+    BCI Competition IV 2a for ``subject`` (looped), 22 channels, 4 classes, a per-subject model trained on session T
+    (needs the ``real`` extra). ``smooth_k``: decisions use the mean of the last k chunk scores (causal).
+    """
 
     def __init__(self, params: RiemannianLDAParams | None = None, device: str = "auto",
                  realtime: bool = True, seed: int = 0, overlap: bool = True,
-                 compile: bool | str = "auto") -> None:
-        self.params = params if params is not None else train_default()
-        self.stream = SyntheticEEGStream(seed=seed, realtime=realtime)
-        self.ring = RingBuffer()
-        self.pipeline = GPUPipeline(self.params, device, overlap=overlap, compile=compile)
+                 compile: bool | str = "auto", source: str = "synthetic", subject: int = 1,
+                 smooth_k: int = 1, stream_factory=None) -> None:
+        self.source, self.subject = source, subject
+        if stream_factory is not None:                # caller supplies the stream (tests, other recordings)
+            if params is None:
+                raise ValueError("params are required with a custom stream_factory")
+            self.params, self._make_stream = params, stream_factory
+        elif source == "real":
+            from .real_benchmark import train_subject
+            from .stream import RealEEGStream
+            self.params = params if params is not None else train_subject(subject)
+            self._make_stream = lambda: RealEEGStream(subject, "1test", realtime=realtime)
+        elif source == "synthetic":
+            self.params = params if params is not None else train_default()
+            self._make_stream = lambda: SyntheticEEGStream(seed=seed, realtime=realtime)
+        else:
+            raise ValueError(f"unknown source {source!r}")
+        self.n_channels = self.params.ref_inv_sqrt.shape[0]
+        self.stream = self._make_stream()
+        self.ring = RingBuffer(n_channels=self.n_channels)
+        self.smoother = ScoreSmoother(smooth_k)
+        self._run: int | None = None
+        self.pipeline = GPUPipeline(self.params, device, overlap=overlap, compile=compile, n_channels=self.n_channels)
         self.pipeline.warmup()
 
+    def _fresh_window(self) -> None:
+        """A new recording run starts: windows must not span the gap, and old scores must not be averaged in."""
+        self.ring = RingBuffer(n_channels=self.n_channels)
+        self.smoother.reset()
+
     def step(self) -> Frame:
-        chunk = next(self.stream)
+        try:
+            chunk = next(self.stream)
+        except StopIteration:                         # a recorded session ended: play it again
+            self.stream, self._run = self._make_stream(), None
+            chunk = next(self.stream)
+        run = (chunk.info or {}).get("run")
+        if run is not None and run != self._run:
+            self._run = run
+            self._fresh_window()
         t_recv_ns = time.perf_counter_ns()
         self.ring.write(chunk.data)
         n = chunk.data.shape[0]
@@ -310,21 +349,33 @@ class StreamingSession:
             return Frame(chunk, None)
         result = self.pipeline.process(self.ring, chunk.index, t_recv_ns)
         self.ring.consume(n)
-        return Frame(chunk, result)
+        smoothed = self.smoother.update(result.scores)
+        return Frame(chunk, result, int(np.argmax(smoothed)), smoothed)
 
 
 class LiveEngine:
-    """Runs a :class:`StreamingSession` on a background thread; the UI polls :meth:`snapshot`."""
+    """Runs a :class:`StreamingSession` on a background thread; the UI polls :meth:`snapshot`.
+
+    Closes the loop: every decision moves a cursor (:class:`~bci.closed_loop.CursorController`) and the
+    sample-to-action latency (newest sample existed -> new cursor position computed) is tracked.
+    """
 
     def __init__(self, params: RiemannianLDAParams | None = None, device: str = "auto",
                  seed: int = 0, history_s: float = 5.0, latency_window: int = 500,
-                 compile: bool | str = "auto") -> None:
-        self.session = StreamingSession(params, device, realtime=True, seed=seed, compile=compile)
+                 compile: bool | str = "auto", source: str = "synthetic", subject: int = 1,
+                 smooth_k: int = 1, cursor_gain: float = 0.1) -> None:
+        self.session = StreamingSession(params, device, realtime=True, seed=seed, compile=compile,
+                                        source=source, subject=subject, smooth_k=smooth_k)
         self.tracker = LatencyTracker(latency_window)
+        self.s2a = LatencyTracker(latency_window)
+        self.controller = CursorController(self.session.params.class_names, gain=cursor_gain)
+        self.agreement = RollingAgreement(self.controller)
         self._lock = threading.Lock()
         self._raw: collections.deque[np.ndarray] = collections.deque(
             maxlen=max(1, int(history_s * FS_HZ / CHUNK_SAMPLES)))
         self._latest: Frame | None = None
+        self._cursor = None
+        self._s2a_last: float | None = None
         self._frames = 0
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -345,28 +396,38 @@ class LiveEngine:
         try:
             while not self._stop.is_set():
                 frame = self.session.step()
+                update = None
                 if frame.result is not None:
                     self.tracker.add(frame.result.latency_ms)
+                    update = self.controller.update(frame.decision_label, frame.chunk.t_emit_ns)
+                    self.s2a.add(update.sample_to_action_ms)
+                    intent = frame.chunk.label if frame.chunk.label >= 0 else None
+                    self.agreement.update(intent, frame.decision_label)
                 with self._lock:
                     self._raw.append(frame.chunk.data)
                     self._latest = frame
                     self._frames += 1
+                    if update is not None:
+                        self._cursor, self._s2a_last = update, update.sample_to_action_ms
         except BaseException as exc:  # noqa: BLE001 - surfaced to the UI via snapshot()
             self.error = exc
             log.exception("live engine stopped")
 
     def snapshot(self) -> dict:
         with self._lock:
-            raw = np.concatenate(list(self._raw)) if self._raw else np.zeros((0, N_CHANNELS), np.float32)
-            frame, frames = self._latest, self._frames
+            n_ch = self.session.n_channels
+            raw = np.concatenate(list(self._raw)) if self._raw else np.zeros((0, n_ch), np.float32)
+            frame, frames, cursor, s2a_last = self._latest, self._frames, self._cursor, self._s2a_last
         res = frame.result if frame else None
         pipe = self.session.pipeline
+        names = self.session.params.class_names
         return {
             "raw": raw,
             "frames": frames,
             "true_label": frame.chunk.label if frame else None,
-            "label": res.label if res else None,
-            "scores": res.scores if res else None,
+            "label": frame.decision_label if frame else None,            # what the cursor acts on (smoothed)
+            "raw_label": res.label if res else None,                     # this chunk's own argmax
+            "scores": frame.decision_scores if frame else None,
             "latency_ms": res.latency_ms if res else None,
             "stage_ms": res.stage_ms if res else {},
             "percentiles": self.tracker.percentiles(),
@@ -378,15 +439,30 @@ class LiveEngine:
             "pipeline": pipe.description,
             "filter": pipe.filter_info.note,
             "ring": self.session.ring.stats(),
+            "class_names": tuple(names),
+            "n_channels": self.session.n_channels,
+            "source": self.session.source,
+            "subject": self.session.subject,
+            "smooth_k": self.session.smoother.k,
+            "cursor": None if cursor is None else {"x": cursor.x, "direction": cursor.direction,
+                                                   "decision_index": cursor.decision_index,
+                                                   "t_sample_wall": cursor.t_sample_wall,
+                                                   "t_action_wall": cursor.t_action_wall},
+            "s2a_last_ms": s2a_last,
+            "s2a": self.s2a.percentiles(),
+            "agreement": self.agreement.summary(),
         }
 
 
 def _empty_snapshot(error: str | None = None, running: bool = True) -> dict:
+    nan_pct = {"n": 0, "p50": float("nan"), "p90": float("nan"), "p99": float("nan")}
     return {"raw": np.zeros((0, N_CHANNELS), np.float32), "frames": 0, "true_label": None, "label": None,
-            "scores": None, "latency_ms": None, "stage_ms": {}, "warming_up": True, "starting": True,
-            "percentiles": {"n": 0, "p50": float("nan"), "p90": float("nan"), "p99": float("nan")},
-            "running": running, "error": error, "device": "starting...", "pipeline": "", "filter": "",
-            "ring": {"dropped_samples": 0, "wrap_count": 0}}
+            "raw_label": None, "scores": None, "latency_ms": None, "stage_ms": {}, "warming_up": True,
+            "starting": True, "percentiles": dict(nan_pct), "running": running, "error": error,
+            "device": "starting...", "pipeline": "", "filter": "", "ring": {"dropped_samples": 0, "wrap_count": 0},
+            "class_names": CLASS_NAMES, "n_channels": N_CHANNELS, "source": "synthetic", "subject": 1, "smooth_k": 1,
+            "cursor": None, "s2a_last_ms": None, "s2a": dict(nan_pct),
+            "agreement": {"n": 0, "rate": float("nan")}}
 
 
 def _publish_loop(conn, engine: LiveEngine, publish_s: float) -> None:
@@ -408,7 +484,8 @@ def _worker_main(args: argparse.Namespace) -> int:
     engine = None
     try:
         compile_arg: bool | str = args.compile if args.compile == "auto" else args.compile == "true"
-        engine = LiveEngine(device=args.device, seed=args.seed, compile=compile_arg).start()
+        engine = LiveEngine(device=args.device, seed=args.seed, compile=compile_arg, source=args.source,
+                            subject=args.subject, smooth_k=args.smooth_k).start()
         _publish_loop(conn, engine, args.publish_s)
     except (EOFError, OSError):
         pass                                          # parent went away
@@ -435,9 +512,11 @@ class ProcessEngine:
     """
 
     def __init__(self, publish_s: float = 0.25, device: str = "auto", seed: int = 0,
-                 compile: bool | str = "auto") -> None:
+                 compile: bool | str = "auto", source: str = "synthetic", subject: int = 1,
+                 smooth_k: int = 1) -> None:
         self._argv_tail = ["--publish-s", str(publish_s), "--device", device, "--seed", str(seed),
-                           "--compile", compile if isinstance(compile, str) else str(compile).lower()]
+                           "--compile", compile if isinstance(compile, str) else str(compile).lower(),
+                           "--source", source, "--subject", str(subject), "--smooth-k", str(smooth_k)]
         self._latest = _empty_snapshot()
         self._lock = threading.Lock()
         self._proc = None
@@ -493,13 +572,13 @@ class ProcessEngine:
         with self._lock:
             return self._latest
 
-    def stop(self) -> None:
+    def stop(self, wait: bool = True) -> None:
         try:
             if self._conn is not None:
                 self._conn.send("stop")
         except (OSError, ValueError):
             pass
-        if self._proc is not None:
+        if self._proc is not None and wait:
             try:
                 self._proc.wait(timeout=10)
             except Exception:  # noqa: BLE001
@@ -701,6 +780,9 @@ def main(argv: list[str] | None = None) -> int:
     w.add_argument("--device", default="auto")
     w.add_argument("--seed", type=int, default=0)
     w.add_argument("--compile", default="auto", choices=["auto", "true", "false"])
+    w.add_argument("--source", default="synthetic", choices=["synthetic", "real"])
+    w.add_argument("--subject", type=int, default=1)
+    w.add_argument("--smooth-k", type=int, default=1)
     w.set_defaults(func=_worker_main)
     args = p.parse_args(argv)
     return args.func(args)
