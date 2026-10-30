@@ -79,14 +79,14 @@ score (0.505) was below 0.57; session E influenced whether to try again, never w
 8.6% of evaluation trials are expert-flagged and decode at 0.60 accuracy vs 0.70 for clean trials. Detail, per-subject tables and caveats:
 [FINDINGS.md](FINDINGS.md) §6 (first version), §8 (Riemannian + smoothing) and §9 (filter-bank CSP); figure `results/real/kappa_vs_competition.png`.
 
-**On the RTX 4060 laptop** (real recordings arriving through LSL from a separate process, 1× real time, five runs of 1000 chunks, **Riemannian decoder**):
-**median label latency 7.1–7.3 ms; p99 10.2–26.0 ms** (target 50 ms, met in every run; the slowest single chunk was 87.7 ms once) and **LSL jitter
-0.05–0.07 ms** (std of producer timestamp → ring buffer delay; limit 1 ms). The p99 varies between runs for a reason I did not isolate (about 1–2% of
-chunks run 4× slower in the covariance and classifier stages in three of the five runs; FINDINGS §7.1; `python -m bci.tail_diag` is the tool for finding
-out), so don't quote one number. **The filter-bank decoder (current default), one run of 1000 chunks over LSL on the same laptop:** median label latency **4.1 ms**, p99 **6.5 ms**, slowest chunk 14.0 ms, **LSL jitter 0.084 ms**
-(`results/real_gpu_fbcsp/`; decoder inferred from the stage profile; no slow-chunk tail in this run, which one run cannot explain; FINDINGS §10). A separate `bci.tail_diag` run (in-process stream, no LSL) read a median of 3.45 ms with no slow
-chunks; that is a different tool and not comparable. **Its accuracy was reproduced on the GPU:** the 9-subject console output equals the container's at 3 decimals (kappa 0.587 / 0.598); only that console text is in the repo (`results/real_gpu_fbcsp_accuracy/`), and the accuracy files in `results/real_gpu_fbcsp/` are the Riemannian decoder's (FINDINGS §9.2, §10.2). Loopback only: no network jitter. These are compute latencies; the decoder's 2 s
-window means a label trails the user's intent by about two seconds.
+**On the RTX 4060 laptop** (real recordings arriving through LSL from a separate process, 1× real time, six runs of 1000 chunks, all with the **Riemannian decoder**):
+**median label latency 4.1–7.3 ms; p99 6.5–26.0 ms** (target 50 ms, met in every run; the slowest single chunk was 87.7 ms once) and **LSL jitter 0.05–0.08 ms**
+(std of producer timestamp → ring buffer delay; limit 1 ms). The p99 varies between runs: in three of the six, about 1–2% of chunks ran several times slower. A diagnostic run
+(`python -m bci.tail_diag`, polling off) reproduced the tail (35 of 1000 chunks above twice the median) and ruled out Python garbage collection and the enqueue on the host: the extra time sits in the classifier
+stage, where `eigh` runs, and the covariance stage. **The cause is not established** (GPU clock or power state, other graphics clients on the laptop, or the synchronisation inside `eigh`); one run with `nvidia-smi` polling on had a
+3.45 ms median and no slow chunk (FINDINGS §10), so don't quote one number. **The filter-bank decoder (current default) has no GPU latency measurement yet**; its accuracy was reproduced on the GPU with raw files that are
+byte-identical to the container's, apart from line endings (`results/real_gpu_fbcsp_accuracy/`, FINDINGS §9.2). Note that `results/real_gpu_fbcsp/` is a *Riemannian* run despite its name. Loopback only: no network jitter.
+These are compute latencies; the decoder's 2 s window means a label trails the user's intent by about two seconds.
 
 ```bash
 pip install -e ".[dev]"                       # includes moabb + pylsl
@@ -212,5 +212,5 @@ and the repo's `Dockerfile` builds unmodified and runs on CPU in a sandbox (CLAI
 ## Limitations
 
 The latency benchmark is on synthetic data; real-data results are a replay of one public dataset; no artifact removal; the dashboard assumes an ideal network; one laptop and
-one software stack were measured; the filter-bank decoder's latency was measured once on the GPU and its accuracy was reproduced there by console output only; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
+one software stack were measured; the filter-bank decoder has no GPU latency measurement (its accuracy is verified on the GPU); the tail-latency cause is open; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
 never run.
