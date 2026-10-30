@@ -597,10 +597,11 @@ All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right ka
 * The comparison with 0.57 stays approximate (FINDINGS §6.2): the competition scored a causal sample-by-sample output;
   here a decision per 256 ms chunk from a 2 s window plus a 4-chunk mean, and both numbers use a best time point chosen on E.
 * One dataset, 9 subjects, replayed recordings, no artifact removal, no person or amplifier.
-* The GPU has not run the new decoder: the 0.587 / 0.598 come from the container's CPU. The streaming code is checked
-  against a CPU reference by a test that also exists for CUDA (§9.7). Its latency on the RTX 4060 is **not measured**; on the
-  container's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms (filter-bank) against 2.18 / 16.74 ms (Riemannian),
-  one run each, which says only that the median cost is similar on CPU.
+* The 0.587 / 0.598 come from the container's CPU and **the GPU has not confirmed them**: the accuracy files that were pushed as
+  the filter-bank GPU results are the Riemannian decoder's (§10.2). The streaming code is checked against a CPU reference by a test
+  that also exists for CUDA; it has not been seen passing on the GPU. Latency on the RTX 4060 was measured once with the filter-bank
+  decoder (§10.1: p50 4.08, p99 6.48 ms); on the container's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms
+  (filter-bank) against 2.18 / 16.74 ms (Riemannian), one run each.
 * The filter-bank decoder has no eigendecomposition and no host synchronisation. Whether that removes the slow-chunk tail
   of §7.1 (which sat in the float64 covariance and classifier stages) is untested.
 
@@ -652,8 +653,52 @@ a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` poin
 
 ### 9.7 Open after phase 4
 
-1. Run on the RTX 4060 (commands in the final report): the new tests (CUDA variant of the filter-bank equivalence test), the 9-subject accuracy run
-   with the filter-bank decoder, its real-data latency (`real_benchmark latency --decoder fbcsp`), and its sample-to-action in the dashboard engine.
+1. Still to run on the RTX 4060: the phase-4 test suite (the CUDA variant of the filter-bank equivalence test), the 9-subject accuracy run with the
+   filter-bank decoder (`real_benchmark accuracy --decoder fbcsp --device cuda`, see `results/real_gpu_fbcsp/README.md`), and its sample-to-action in the
+   dashboard engine. Done once: its real-data latency over LSL (§10.1).
 2. The tail diagnostic runs of §9.5 (cause of the slow chunks).
 3. A real Hugging Face Space and `docker run --gpus all`.
 4. Beyond this project's reach from the container: any real amplifier or participant.
+
+## 10. Intermittent Tail Latency on Windows
+
+### 10.1 Evidence so far (RTX 4060 laptop, real data, 1000 paced chunks per run, chunk received → label)
+
+| run | tool / path | decoder | p50 ms | p99 ms | max ms | chunks > 20 ms |
+|---|---|---|---|---|---|---|
+| 0 | `real_benchmark` over LSL (`latency_run0`) | Riemannian | 7.064 | 10.289 | 12.986 | 0 |
+| 1 | same (`latency_run1`) | Riemannian | 7.142 | 20.133 | 87.658 | 11 |
+| 2 | same (`latency_run2`) | Riemannian | 7.321 | 20.424 | 25.490 | 13 |
+| 3 | same (`latency_run3`) | Riemannian | 7.204 | 25.970 | 49.953 | 19 |
+| 4 | same (`latency_run4`) | Riemannian | 7.261 | 10.227 | 11.518 | 0 |
+| 5 | same (`results/real_gpu_fbcsp/`) | filter-bank (by stage profile; not recorded in the files) | 4.078 | 6.477 | 13.962 | 0 |
+| 6 | `bci.tail_diag`, in-process stream, no LSL (console paste only) | not recorded (tool default is Riemannian) | 3.450 | not in the paste | not in the paste | 0 slow (threshold 6.90 ms = 2 × median) |
+
+Run 5 in detail (recomputed from its 1000 raw rows, identical to its summary file): e2e p50 / p90 / p99 / max 4.078 / 5.183 / 6.477 / 13.962 ms,
+one chunk above 10 ms, none above 20 ms; producer timestamp → label p50 / p90 / p99 / max 4.625 / 5.748 / 7.085 / 15.682 ms; stage medians h2d 0.099, filter 0.585
+(banked 9-band FIR), cov 0.961, classifier 1.656 (no `eigh`), d2h 0.083 ms. **LSL jitter (std) 0.0837 ms**, mean delay 0.507 ms, maximum delay 1.780 ms
+(above 1 ms; the bar is on the std), 0 ring-buffer drops. The producer's own schedule was less steady than in runs 0–4: std 0.348 ms (earlier 0.011–0.021) and a worst deviation
+of 6.0 ms; that moves arrival times, not the compute time measured here.
+
+### 10.2 Two things in the pushed files that must not be misread
+
+* **The median of run 5 is 4.078 ms, not 3.45 ms.** The 3.450 ms median belongs to run 6, a different tool (in-process stream, instrumented calls, nvidia-smi polling) whose decoder was not
+  recorded. The two cannot be quoted as one result set. If run 6 used the default (Riemannian) decoder, its median is half of runs 0–4 (7.1–7.3 ms) on the same machine, which would need
+  its own explanation (no LSL producer process or inlet thread, the instrumentation, the nvidia-smi polling keeping the GPU awake between paced chunks — none of these tested).
+  `bci.tail_diag` now writes the decoder into its summary header.
+* **`results/real_gpu_fbcsp/` holds the Riemannian decoder's accuracy files.** Its `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv` are identical to `results/real/riemann_k4/` apart
+  from line endings (kappa 0.505 / 0.523, accuracy 0.629), whereas the filter-bank decoder scored 0.587 / 0.598 in the container. So the filter-bank decoder's accuracy has **not** been checked on the GPU;
+  `results/real_gpu_fbcsp/README.md` says which files are which and gives the command that produces the missing result.
+
+### 10.3 What can and cannot be said
+
+* The tail was present in 3 of 5 Riemannian runs (p99 20.1–26.0 ms, 1–2% of chunks 4× slower in the covariance and classifier stages, §7.1) and absent in 2 of 5. It was absent in both later
+  runs (5 and 6), which used different tools and, for run 5, a different decoder. Two tail-free runs cannot separate "the decoder changed", "the tool changed" and "luck": runs 0 and 4 were tail-free too.
+* **One explanation on the table is transient interference from the operating system** (the Python garbage collector, antivirus real-time scanning, scheduling of other processes). It fits an intermittent,
+  scattered tail, but nothing measured so far supports it over the others: the other candidates are another GPU consumer and the host thread being descheduled while it enqueues the float64 kernels
+  (§7.1). Run 6 had no slow chunks, so it could neither show nor exclude garbage-collection pauses (the `gc_ms` column only helps when slow chunks occur), and the tool cannot see antivirus activity.
+  The statement that these were "not pipeline bugs" is likewise **not established**: no defect was found, and the evidence does not exclude one.
+* What would settle it: several `bci.tail_diag` runs with the Riemannian decoder (the one that showed the tail), with `--no-gc`, `--priority high` and `--no-telemetry` as A/B switches, until slow chunks occur
+  (SPEC.md §13.4, §9.5). `--no-telemetry` is the one to run first: it tests whether the polling in run 6 changed the median.
+* For the project's latency target none of this changes the outcome: p99 is under 50 ms in all six benchmark runs (10.2–26.0 ms Riemannian; 6.5 ms in the one filter-bank run), so the margin is 1.9× to
+  7.7×, and the number to quote is the range, not one run.

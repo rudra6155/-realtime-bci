@@ -265,7 +265,7 @@ def run(args: argparse.Namespace) -> dict:
             w.writerow({k: (f"{v:.6f}" if isinstance(v, float) else v) for k, v in r.items()})
     res, text = analyse([{k: (float(v) if k != "gpu_throttle" else 0.0) for k, v in r.items()} for r in meas])
     header = f"device: {device_label(dev)} | {pipe.description} | filter: {pipe.filter_info.note}\nflags: " + \
-             json.dumps({"no_gc": args.no_gc, "priority": args.priority, "telemetry": tele is not None, "paced": not args.unpaced,
+             json.dumps({"decoder": args.decoder, "no_gc": args.no_gc, "priority": args.priority, "telemetry": tele is not None, "paced": not args.unpaced,
                          "notes": notes})
     (out / f"{prefix}tail_diag_summary.txt").write_text(header + "\n" + text + "\n")
     print(header + "\n" + text)

@@ -83,8 +83,9 @@ score (0.505) was below 0.57; session E influenced whether to try again, never w
 **median label latency 7.1–7.3 ms; p99 10.2–26.0 ms** (target 50 ms, met in every run; the slowest single chunk was 87.7 ms once) and **LSL jitter
 0.05–0.07 ms** (std of producer timestamp → ring buffer delay; limit 1 ms). The p99 varies between runs for a reason I did not isolate (about 1–2% of
 chunks run 4× slower in the covariance and classifier stages in three of the five runs; FINDINGS §7.1; `python -m bci.tail_diag` is the tool for finding
-out), so don't quote one number. **The filter-bank decoder has not been run on the GPU:** its latency is unmeasured (it has no `eigh`, which may change the
-tail; untested), and its accuracy was computed in the container only. Loopback only: no network jitter. These are compute latencies; the decoder's 2 s
+out), so don't quote one number. **The filter-bank decoder (current default), one run of 1000 chunks over LSL on the same laptop:** median label latency **4.1 ms**, p99 **6.5 ms**, slowest chunk 14.0 ms, **LSL jitter 0.084 ms**
+(`results/real_gpu_fbcsp/`; decoder inferred from the stage profile; no slow-chunk tail in this run, which one run cannot explain; FINDINGS §10). A separate `bci.tail_diag` run (in-process stream, no LSL) read a median of 3.45 ms with no slow
+chunks; that is a different tool and not comparable. **Its accuracy has not been confirmed on the GPU:** the accuracy files in that folder are the Riemannian decoder's (FINDINGS §10.2), so 0.587 / 0.598 are from the container's CPU. Loopback only: no network jitter. These are compute latencies; the decoder's 2 s
 window means a label trails the user's intent by about two seconds.
 
 ```bash
@@ -211,5 +212,5 @@ and the repo's `Dockerfile` builds unmodified and runs on CPU in a sandbox (CLAI
 ## Limitations
 
 The latency benchmark is on synthetic data; real-data results are a replay of one public dataset; no artifact removal; the dashboard assumes an ideal network; one laptop and
-one software stack were measured; the filter-bank decoder has not been run on the GPU; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
+one software stack were measured; the filter-bank decoder's latency was measured once on the GPU but its accuracy there is unconfirmed; the cursor is a weak control signal; Hugging Face deployment, `docker --gpus` and CI were
 never run.
