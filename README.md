@@ -78,12 +78,14 @@ Artifacts are logged, not removed (no ICA): 8.6% of evaluation trials are expert
 accuracy vs 0.63 for clean trials (0.52 vs 0.60 before smoothing). Detail, per-subject tables and caveats:
 [FINDINGS.md](FINDINGS.md) §6 (first version) and §8 (selected decoder), figure `results/real/kappa_vs_competition.png`.
 
-**On the RTX 4060 laptop** (real recordings arriving through LSL from a separate process, 1× real time,
-1000 chunks): **p99 label latency 10.3 ms** (target 50 ms) and **LSL jitter 0.053 ms** (std of producer
-timestamp → ring buffer delay; limit 1 ms; 0.097 ms in the test). The first version's accuracy and kappa were
-byte-identical on the Linux CPU container and on the GPU; the 0.505 / 0.523 above were computed in the
-container only. Loopback only: no network jitter. The 10 ms is compute
-latency; the decoder's 2 s window means a label trails the user's intent by about two seconds.
+**On the RTX 4060 laptop** (real recordings arriving through LSL from a separate process, 1× real time, five
+runs of 1000 chunks): **median label latency 7.1–7.3 ms; p99 10.2–26.0 ms** (target 50 ms, met in every run; the
+slowest single chunk was 87.7 ms once) and **LSL jitter 0.05–0.07 ms** (std of producer timestamp → ring buffer
+delay; limit 1 ms). The p99 varies between runs for a reason I did not isolate (about 1–2% of chunks run 4× slower
+in the covariance and classifier stages in the three high-p99 runs; FINDINGS §7.1), so don't quote one number.
+The 0.505 / 0.523 kappa and the accuracy above were reproduced on the GPU (identical output; the first version's
+were byte-identical on both machines too). Loopback only: no network jitter. These are compute
+latencies; the decoder's 2 s window means a label trails the user's intent by about two seconds.
 
 ```bash
 pip install -e ".[dev]"                       # includes moabb + pylsl
@@ -103,9 +105,10 @@ loop; needs `pip install -e ".[real]"` for MOABB).
 ![closed-loop dashboard, real EEG](results/closed_loop_real_cpu.png)
 
 *Container, CPU device, real subject 1.* What is and is not established (FINDINGS §8.3, CLAIMS P18–P23):
-* Sample-to-action was **not measured on the GPU**. The CPU screenshots read p50 / p99 3.05 / 8.90 ms (real) and
-  4.66 / 16.40 ms (synthetic), one readout each; sample-to-render also includes the ≤ 250 ms page poll, and the
-  browser's paint is not measured.
+* Sample-to-action on the **RTX 4060** (real subject 1, one 180 s run, newest 500 decisions): **p50 7.6 ms, p90 9.4 ms,
+  p99 19.2 ms**, of which the action step itself adds 0.4–0.5 ms. The CPU screenshots read p50 / p99 3.05 / 8.90 ms
+  (real) and 4.66 / 16.40 ms (synthetic), one readout each. Sample-to-render also includes the ≤ 250 ms page poll;
+  the browser's paint is not measured.
 * Sample-to-action excludes the window: a label trails the user's intent by about 2 s plus 0.4 s of smoothing delay.
 * The cursor is an integrator and is pinned at +1.00 in the screenshot: it shows the decoder's direction, not a
   calibrated control signal. The 52% intent agreement shown there is a short rolling window, not an accuracy.

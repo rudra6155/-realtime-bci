@@ -342,7 +342,7 @@ experts' flag and whether the fixed-window prediction was right.
   no change when the GPU-run files were pushed over the CPU-run ones, and the nine per-subject console lines
   match to the printed precision. The GPU machine took 33–79 s per subject (it includes a ~80 MB MOABB
   download per subject), the container ~25 s.
-* Real-data label latency and LSL jitter: GPU machine, §7.2.
+* Real-data label latency and LSL jitter: GPU machine, five runs, §7.1.
 
 ## 7. Phase 2: LSL transport and jitter
 
@@ -359,39 +359,60 @@ Container, loopback, 64-channel synthetic chunks, producer process separate, fir
 | container: `python -m bci.lsl_stream jitter --seconds 15` | 54 | 0.177 ms | 0.927 | 0.892 | 1.658 | 0.766 | 1.808 | 0.232 ms |
 | container: real recordings (S1 E) with the pipeline running (`real_benchmark latency`, CPU smoke) | 150 | 0.472 ms | 0.832 | 0.768 | 1.581 | 0.813 | 6.279 | 1.335 ms |
 | **RTX 4060 laptop, Windows**: `tests/test_lsl.py` | 50 | **0.097 ms** | 0.601 | 0.592 | 0.791 | 0.199 | 0.801 | 0.014 ms |
-| **RTX 4060 laptop, Windows**: real recordings (S1 E) with the GPU pipeline running (`real_benchmark all`, `results/real/real_latency_summary.csv`) | 1000 | **0.053 ms** | 0.436 | 0.429 | 0.614 | 0.185 | 0.964 | 0.012 ms |
+| **RTX 4060 laptop, Windows**: real recordings (S1 E) with the GPU pipeline running, five runs (`results/real/latency_run0..4/real_latency_summary.csv`; range over runs) | 1000 each | **0.051–0.067 ms** | 0.436–0.477 | 0.429–0.470 | 0.614–0.666 | 0.151–0.233 | 0.863–1.469 | 0.010–0.021 ms |
 
 * Jitter stays below the 1 ms bar in every measurement, but the third shows what contention does: with the pipeline
   busy on the same 4-vCPU machine the maximum delay hit 6.3 ms, the producer's own schedule jitter rose to
-  1.3 ms and its worst single deviation from the 256 ms schedule was 11.3 ms. The Windows laptop, with more CPU headroom than the 4-vCPU container, was tighter: 0.05–0.10 ms with a maximum delay under 1 ms over 1000 chunks and 0 ring-buffer drops.
+  1.3 ms and its worst single deviation from the 256 ms schedule was 11.3 ms. The Windows laptop, with more CPU headroom than the 4-vCPU container, was tighter: 0.05–0.10 ms (std) in the test and all five 1000-chunk runs, with 0 ring-buffer drops (maximum delay 0.86–1.47 ms).
 * Float32 data crosses LSL **bit-identical** (test), and the pipeline gives the same scores whether chunks come
   straight from the generator or through LSL (`atol = 1e-9`).
 * **Loopback on one machine only**: this says nothing about network (Wi-Fi/Ethernet) jitter or about a real
   amplifier's own timestamp noise. Windows LSL discovery worked without any configuration (the `Stream
   transmission broke off` lines in the log are the producer exiting at the end of the stream).
 
-### 7.1 Real-data label latency over LSL on the GPU (RTX 4060 laptop)
+### 7.1 Real-data label latency over LSL on the GPU (RTX 4060 laptop): five runs
 
-`python -m bci.real_benchmark all` on the GPU machine: subject 1's session E, 1000 chunks after 50 warm-up
-chunks (and the 7 chunks that fill the first window), arriving at 1× real time through LSL from a separate
-process into the ring buffer and the pipeline (2 CUDA streams, pinned buffers, `torch.compile`d filter,
-22 channels, 4 classes). `results/real/real_latency_paced.csv` (1000 rows, recomputed percentiles identical
-to `real_latency_summary.csv` and to the console).
+Each run: subject 1's session E, 1000 chunks after 50 warm-up chunks (and the 7 chunks that fill the first
+window), arriving at 1× real time through LSL from a separate process into the ring buffer and the pipeline
+(2 CUDA streams, pinned buffers, `torch.compile`d filter, 22 channels, 4 classes). Raw per-chunk files:
+`results/real/latency_run0..4/real_latency_paced.csv`; the percentiles recomputed from all five raw files are
+identical to the five `real_latency_summary.csv` (within 1e-5 ms). Run 0 is the first GPU run (before phase 3);
+run 1 is the `real_benchmark all` run after phase 3; runs 2, 3 and 4 are `real_benchmark latency`, run 3 and 4
+back to back (about 6 min apart by the console clock, which is not stored in the repo). The code that is measured
+(`GPUPipeline`, `drive`, `LatencyTracker`, `run_latency`) has no changed line between run 0 and runs 1–4 (git diff).
 
-| (ms) | p50 | p90 | **p99** | max |
-|---|---|---|---|---|
-| chunk received → label (`e2e_ms`) | 7.064 | 8.546 | **10.289** | 12.986 |
-| producer LSL timestamp → label | 7.520 | 9.023 | **10.709** | 14.632 |
+| run | e2e p50 (ms) | p90 | **p99** | max | chunks > 20 ms | LSL timestamp → label p99 | LSL jitter std (ms) |
+|---|---|---|---|---|---|---|---|
+| 0 | 7.064 | 8.546 | **10.289** | 12.986 | 0 | 10.709 | 0.053 |
+| 1 | 7.142 | 9.877 | **20.133** | 87.658 | 11 | 20.621 | 0.067 |
+| 2 | 7.321 | 9.864 | **20.424** | 25.490 | 13 | 20.967 | 0.062 |
+| 3 | 7.205 | 9.605 | **25.970** | 49.953 | 19 | 26.543 | 0.051 |
+| 4 | 7.261 | 8.163 | **10.227** | 11.518 | 0 | 10.729 | 0.057 |
 
-Stage breakdown (GPU-event times), p50 / p90 / p99: h2d 0.066 / 0.125 / 0.202; filter 0.108 / 0.111 / 0.360;
-cov (+whitening) 0.771 / 0.926 / 1.553; **classifier 4.975 / 5.260 / 6.975**; d2h 0.070 / 0.093 / 0.158.
-
-* Under the 50 ms target by 5×. The producer-timestamp-to-label figure includes the LSL delay (mean
-  0.44 ms), so LSL adds under 1 ms.
-* Compared with the synthetic 64-channel paced run in §2 (e2e p99 23.4 ms, classifier stage 16.2 ms p50) the
-  22-channel real-data run is ~2.3× lower end to end and the classifier stage ~3.3× lower. The likely reason
-  is the smaller eigenproblem (22×22 instead of 64×64 per chunk), but this was not isolated: the two runs
-  also differ in producer process, subject data and machine state.
+* **Median stable, tail not.** p50 is 7.06–7.32 ms in all five runs; p99 ranges from 10.2 to 26.0 ms and the maximum
+  from 11.5 to 87.7 ms. Run 1 has one chunk above 50 ms (87.7 ms) and run 3's slowest chunk is 49.95 ms; in the
+  other three runs no chunk exceeds 26 ms. The p99 stays under the 50 ms target in every run (margin 1.9× to 4.9×).
+  Runs 3 and 4 were taken minutes apart and gave 26.0 and 10.2 ms, so this is not a slow drift. The number
+  of runs is too small to say whether p99 has two typical values or a spread.
+* **Where the slow chunks are** (runs 1–3, 11 / 13 / 19 chunks above 20 ms, i.e. 1.1–1.9% of chunks; runs 0 and 4
+  have none): scattered over the run (positions 18–997, at most two neighbouring pairs), not one stall. On those
+  chunks the covariance+whitening stage is 4.1–4.8× its normal median (3.4–3.9 ms against 0.79–0.86) and the
+  classifier stage 3.4–4.3× (17.1–21.7 ms against 5.0–5.1); the host-to-device copy, filter and device-to-host
+  times barely move (h2d +0.01 ms, filter +0.00–0.01 ms median), and the part of the end-to-end time outside the
+  five GPU-event stages is 0.9 ms on normal chunks and 1.1–1.8 ms on slow ones. So the extra time is inside the two
+  float64 stages, not in the LSL transport or the copies. **The cause was not isolated.** Two candidates, both
+  untested: something else intermittently competing for the GPU, or the Python thread being descheduled while it
+  enqueues the many small float64 kernels of those two stages (the stage times are CUDA-event times, which also
+  include a delayed enqueue).
+* **LSL jitter** (std of producer timestamp → ring-buffer delay) is 0.051–0.067 ms in all five runs, far under
+  1 ms; the maximum delay was 0.863–1.469 ms (above 1 ms in runs 1 and 4: the bar is on the std); 0 ring drops.
+* Stage breakdown of run 0 (GPU-event times), p50 / p90 / p99: h2d 0.066 / 0.125 / 0.202; filter 0.108 / 0.111 / 0.360;
+  cov (+whitening) 0.771 / 0.926 / 1.553; **classifier 4.975 / 5.260 / 6.975**; d2h 0.070 / 0.093 / 0.158.
+* Compared with the synthetic 64-channel paced run in §2 (e2e p50 18.6 ms, p99 23.4 ms; classifier stage 16.2 ms
+  p50) the 22-channel real-data runs have a ~2.6× lower median and a ~3.2× lower classifier median; at p99 the
+  real-data runs range from 2.3× lower to slightly higher (26.0 ms). The likely reason for the lower median is the
+  smaller eigenproblem (22×22 instead of 64×64 per chunk), but this was not isolated: the runs also differ in
+  producer process, subject data and machine state.
 * This is **compute latency** (chunk complete → label). The decoder's 2 s window means a label trails the
   user's intent by about two seconds regardless of it.
 
@@ -454,9 +475,10 @@ All trials: accuracy 0.629, kappa 0.506 (fixed) / 0.517 (best). Left-vs-right ka
 * **Not done, on purpose:** no further candidate was scored on E, no per-subject tuning, no artifact removal, no
   filter-bank CSP as in the winning method. Nothing here supports claiming the winner is beaten.
 * Same caveats as §6.2 about what the 0.57 measures (sample-by-sample causal output, best time point chosen on E).
-* The 0.505 was computed in the container only. The GPU path computes the same scores up to float rounding
-  (baseline results were byte-identical across machines), but `make benchmark-real` has not been run on the GPU
-  machine with the smoothing.
+* **Reproduced on the GPU** (`python -m bci.real_benchmark all` on the RTX 4060 laptop): the nine per-subject console
+  lines and the mean lines (accuracy 0.629, kappa 0.505 / 0.523, left-vs-right 0.770 / 0.542) are identical to the
+  container's, and git reports no change in `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv`
+  after that run. The PNG was re-rendered with different bytes (not committed).
 
 ### 8.3 Closed-loop dashboard
 
@@ -470,11 +492,25 @@ Checked in the container (CPU device, headless Chromium, `results/closed_loop_sy
 `results/closed_loop_real_cpu.png`): both sources render with no Streamlit exception; `tests/test_dashboard.py` asserts
 the cursor takes at least two positions within 12 s and that sample-to-action is displayed and positive;
 `tests/test_server.py` runs the process engine on both sources (the real source needs `BCI_RUN_REAL=1`). Full suite:
-74 passed, 9 skipped (CUDA-only).
+74 passed, 9 skipped (CUDA-only) in the container; **82 passed, 1 skipped in 150 s on the RTX 4060 laptop** with
+`BCI_RUN_REAL=1` and `BCI_REQUIRE_CUDA=1` (the skip is the CPU `torch.compile` test: no C++ compiler on Windows).
 
 Read off the two screenshots (one readout each, CPU, **not a benchmark**): sample-to-action p50 / p99 =
 4.66 / 16.40 ms (synthetic, 94 decisions) and 3.05 / 8.90 ms (real subject 1, 153 decisions), sample-to-render
-p50 / p99 = 283 / 567–571 ms. **Sample-to-action on the GPU has not been measured.**
+p50 / p99 = 283 / 567–571 ms.
+
+**On the RTX 4060 laptop** (`ProcessEngine(source='real', subject=1, smooth_k=4)`, device line `NVIDIA GeForce RTX 4060
+Laptop GPU`, `cuda: 2 streams, pinned, async torch.compile`; 180 s run, statistics over the newest 500 decisions;
+one run, console output, no raw file saved):
+
+| (ms) | p50 | p90 | p99 |
+|---|---|---|---|
+| sample-to-action | 7.580 | 9.369 | 19.173 |
+| chunk received → label | 7.218 | 8.910 | 18.635 |
+
+The action step (smoothing, cursor update, hand-over) adds 0.36 ms at p50 and 0.54 ms at p99. An earlier 90 s run
+(279 decisions, device not printed) read 7.686 / 11.952 / 20.297 ms. The p99 here is on the high side of the §7.1
+range for the same reasons (a few slow chunks decide a p99 over 500 samples); the cause was not isolated.
 
 Two things visible in those screenshots that should not be read as results:
 * The cursor sits at +1.00 in both: it is an integrator with step 0.1 that holds on feet/tongue, so after ten
