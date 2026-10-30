@@ -1,0 +1,15 @@
+metric,p50,p90,p99,max
+e2e_ms,7.261100,8.163450,10.227485,11.518200
+lsl_ts_to_label_ms,7.770203,8.671943,10.728711,11.960303
+jitter_n_chunks,1000,,,
+jitter_skipped,57,,,
+jitter_delay_mean_ms,0.476998,,,
+jitter_jitter_std_ms,0.057146,,,
+jitter_delay_p50_ms,0.470353,,,
+jitter_delay_p99_ms,0.640915,,,
+jitter_p99_minus_p50_ms,0.170562,,,
+jitter_delay_max_ms,1.468703,,,
+jitter_pull_jitter_std_ms,0.055263,,,
+jitter_producer_schedule_std_ms,0.013656,,,
+jitter_producer_schedule_max_abs_ms,0.146000,,,
+jitter_ring_dropped_samples,0,,,
