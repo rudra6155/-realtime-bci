@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 
 from bci import LATENCY_TARGET_MS
-from bci import classifier, filters, gpu_pipeline
+from bci import classifier, fbcsp, filters, gpu_pipeline
 from bci.gpu_pipeline import GPUPipeline, main, run_benchmark, write_chunk_csv
 
 from conftest import require_cuda
@@ -29,11 +29,14 @@ HOT_PATH = {                         # module -> functions that run per chunk
     filters: ["FIRBandpass.forward"],
     classifier: ["RiemannianLDA.covariance", "RiemannianLDA.whiten", "RiemannianLDA.log_features",
                  "RiemannianLDA.tangent", "RiemannianLDA.head", "RiemannianLDA.forward"],
+    fbcsp: ["FBCSPLDA.covariance", "FBCSPLDA.whiten", "FBCSPLDA.log_features", "FBCSPLDA.head", "FBCSPLDA.forward"],
 }
 NO_LOOPS = [filters.FIRBandpass.forward, classifier.RiemannianLDA.covariance,
             classifier.RiemannianLDA.whiten, classifier.RiemannianLDA.log_features,
             classifier.RiemannianLDA.tangent, classifier.RiemannianLDA.head,
-            classifier.RiemannianLDA.forward]        # vectorized over channels: no loops at all
+            classifier.RiemannianLDA.forward,
+            fbcsp.FBCSPLDA.covariance, fbcsp.FBCSPLDA.whiten, fbcsp.FBCSPLDA.log_features, fbcsp.FBCSPLDA.head,
+            fbcsp.FBCSPLDA.forward]                  # vectorized over channels and bands: no loops at all
 
 
 def _hot_functions():

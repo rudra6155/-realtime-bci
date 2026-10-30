@@ -1,0 +1,16 @@
+S1: fixed kappa(clean)=0.791 acc=0.843 | peak kappa(clean)=0.805 @ 2.80s | L/R acc=0.858 | artifact trials 7/288 | 74s
+S2: fixed kappa(clean)=0.369 acc=0.527 | peak kappa(clean)=0.397 @ 3.32s | L/R acc=0.592 | artifact trials 5/288 | 32s
+S3: fixed kappa(clean)=0.795 acc=0.846 | peak kappa(clean)=0.795 @ 3.06s | L/R acc=0.964 | artifact trials 15/288 | 36s
+S4: fixed kappa(clean)=0.427 acc=0.570 | peak kappa(clean)=0.444 @ 3.32s | L/R acc=0.621 | artifact trials 60/288 | 36s
+S5: fixed kappa(clean)=0.387 acc=0.540 | peak kappa(clean)=0.392 @ 2.80s | L/R acc=0.859 | artifact trials 12/288 | 35s
+S6: fixed kappa(clean)=0.330 acc=0.498 | peak kappa(clean)=0.330 @ 3.06s | L/R acc=0.750 | artifact trials 73/288 | 33s
+S7: fixed kappa(clean)=0.774 acc=0.830 | peak kappa(clean)=0.774 @ 3.06s | L/R acc=0.907 | artifact trials 11/288 | 33s
+S8: fixed kappa(clean)=0.784 acc=0.838 | peak kappa(clean)=0.808 @ 2.80s | L/R acc=0.933 | artifact trials 17/288 | 31s
+S9: fixed kappa(clean)=0.626 acc=0.720 | peak kappa(clean)=0.636 @ 2.80s | L/R acc=0.869 | artifact trials 24/288 | 34s
+
+mean over subjects (session T -> E, artifact-free trials unless noted):
+  4-class accuracy, fixed window       : 0.690   (all trials: 0.689)
+  4-class Cohen's kappa, fixed window  : 0.587   (all trials: 0.585)
+  4-class kappa, best time point       : 0.598   (all trials: 0.594)
+  left-vs-right accuracy / kappa       : 0.817 / 0.634
+  competition winner (Ang et al.) kappa: 0.57

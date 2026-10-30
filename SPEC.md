@@ -273,12 +273,13 @@ on **session T**. Checking the Docker / Hugging Face deployment was deferred by 
 * **Decision.** One per 256 ms chunk once the ring holds the 500-sample window. With smoothing `k` the score
   vector is the mean of the last `k` chunk score vectors (causal; reset at run starts); the decision is its argmax.
   Default `k`: 1 for synthetic, 4 for real (§12.2; `DEFAULT_SMOOTH_K`).
-* **Cursor.** Position `x` in [−1, 1], starts at 0, and is a pure integrator: each decision of *Left Hand*
-  subtracts 0.1, *Right Hand* adds 0.1, any other class (feet, tongue) leaves it unchanged; clipped at ±1.
+* **Cursor.** Position `x` in [−1, 1], starts at 0: each decision of *Left Hand* pushes −0.1, *Right Hand* +0.1,
+  any other class (feet, tongue) does not push; clipped at ±1. Phase 3 used a pure integrator (`x ← x + push`); from
+  phase 4 the position leaks, `x ← clip(0.95·x + push, −1, 1)` (§13.3).
 * **Sample-to-action latency.** From the instant the newest sample used by the decision existed (the chunk's
   completion time, `Chunk.t_emit_ns`) to the instant the new cursor position has been computed. It contains
-  stream hand-over, ring-buffer write, H2D copy, filter, covariance, `eigh`, classifier, D2H copy, smoothing and
-  the controller update. It does **not** contain the window length (a label trails the user's intent by about
+  stream hand-over, ring-buffer write, H2D copy, filter, covariance, the feature and classifier stages (with `eigh`
+  for the Riemannian decoder), D2H copy, smoothing and the controller update. It does **not** contain the window length (a label trails the user's intent by about
   the 2 s window plus the smoothing delay), the browser, or the screen.
 * **Sample-to-render** is estimated on the server (action time → the moment the page's poll reads it); it adds
   the poll period (≤ 250 ms). Browser paint is **not** measured.
@@ -312,3 +313,67 @@ on **session T**. Checking the Docker / Hugging Face deployment was deferred by 
 One run over the 9 subjects with the protocol of §11 and the selected smoothing; the fixed bin is unchanged.
 The phase-2 baseline (no smoothing) is kept in `results/real/baseline_k1/` for comparison. No other
 configuration was evaluated on session E.
+
+## 13. Phase 4: round 2 of decoder selection (session T only), cursor leak, tail diagnostic, deployment check
+
+Requested after phase 3: close the four remaining gaps (kappa gap, pinned cursor, unexplained latency tail, untested
+deployment). This section was written **before** the round-2 analysis was run.
+
+### 13.1 Round-2 candidates and rule (declared before computing)
+
+`python -m bci.real_benchmark select2` never loads session E. Same protocol as §12.2 (500-sample window, the same
+training windows, leave-one-run-out CV over the 6 runs of session T, Cohen's kappa at the fixed bin 3.06 s after the
+cue on artifact-free trials, mean over the 9 subjects), with 36 candidates in three families:
+* **R, Riemannian tangent space + LDA** (the current decoder), one band 8–30 Hz, covariance shrinkage in the order
+  [0.05 (current), 0.2, 0.01].
+* **F, filter-bank CSP (the 2008 winner's family)**: 9 bands of 4 Hz from 4 to 40 Hz (151-tap Hamming FIR), one-vs-rest
+  CSP with m = 2 filter pairs per class and band (16 filters per band, 144 features: log relative variance of the
+  projected, trace-normalised window covariance), CSP fitted inside each training fold, mutual-information feature
+  selection (`sklearn.feature_selection.mutual_info_classif`, `random_state=0`, top d) and LDA with automatic
+  shrinkage; d in the order [24, 48].
+* **H, hybrid**: the tangent features of R (shrinkage 0.05) concatenated with the F features (d = 24), one LDA.
+* Smoothing `k` in {1, 2, 3, 4, 6, 8} chunks for every family member.
+
+**Rule** (same as §12.2): highest mean kappa; every candidate within one paired standard error of it is
+indistinguishable; among those pick the simplest by (family order R < F < H, position in the lists above, k). If the
+current decoder (R, 0.05, k = 4) is indistinguishable from the best, it stays. Session E is then scored **once**
+with the selected candidate. With 36 candidates the best raw session-T score is optimistically biased; the session-E
+score is not.
+
+### 13.2 Result of round 2 and the deployed decoder
+
+The rule of §13.1 selected **F with d = 48 features and k = 4** (§ FINDINGS 9.1). It is now the default decoder of
+the real-data path (`real_benchmark --decoder fbcsp`, `DEFAULT_DECODER`); the Riemannian decoder stays available as
+`--decoder riemann`. Session E was scored once with it (§12.3 protocol, results in `results/real/`).
+
+Streaming implementation (`src/bci/fbcsp.py`, `FBCSPLDA`), through the same `GPUPipeline` as the Riemannian decoder:
+* band-pass: one `conv1d` with 9 output channels (151-tap Hamming FIR per 4 Hz band, 4–40 Hz), float32, mean-removed;
+* covariance per band (float64), normalised to trace 1 (no shrinkage, as in the selection);
+* features: `log diag(W C Wᵀ)` for 16 CSP filters per band (one-vs-rest, m = 2 pairs), keep the 48 indices chosen by
+  mutual information on the training windows, then LDA (`nn.Linear`, float64);
+* **no eigendecomposition and no host synchronisation** at run time (the CSP filters are fitted offline).
+Training uses the same 9 windows per trial as the Riemannian decoder. The ONNX head export is only implemented for
+the Riemannian model.
+
+### 13.3 Cursor control law
+
+The leak `decay = 0.95` (time constant 1/(1−0.95) = 20 decisions ≈ 5.1 s) was fixed before any evaluation of it; it is
+a design choice, not a tuned value. Its effect is measured by replaying the session-E decisions of each decoder
+through the plain integrator and through the leaky one (`scripts/cursor_sim.py`): share of decisions with the cursor at
+an edge, and share of left/right-imagery chunks on which the cursor is on the intended side (chance ≈ 0.5).
+
+### 13.4 Tail-latency diagnostic (`python -m bci.tail_diag`)
+
+For the unexplained slow chunks of FINDINGS §7.1. Per chunk of the same paced real-data run it records the host time
+inside `stage`, `launch_pre` (enqueue only: never waits), `launch_post` and `collect`, Python garbage-collection pauses
+overlapping the chunk, and `nvidia-smi` telemetry at 1 Hz; `--no-gc`, `--priority high` and `--no-telemetry` are the
+A/B switches. The summary compares slow chunks (end-to-end > 2× median) with normal ones and prints hints, which are
+simple comparisons, not proofs. It needs the GPU laptop: in the container only its logic and a CPU run are tested.
+
+### 13.5 Deployment check
+
+What was run, and where (details and limits: CLAIMS.md C1, C4, P35–P36):
+* the repo's `Dockerfile`, unmodified, built and run in a sandbox with a Docker daemon started inside it (CPU only);
+* `requirements.txt` installed alone into a clean virtual environment, then `streamlit run app/dashboard.py`.
+Both were checked by loading the page in headless Chromium. A Hugging Face Space itself was not created (needs the
+user's account), and `docker run --gpus all` / `docker-compose.yml` were not run.

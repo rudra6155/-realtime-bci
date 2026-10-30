@@ -174,9 +174,10 @@ def live_view(engine: ProcessEngine) -> None:
         return
     truth = snap["true_label"]
     st.markdown(cursor_html(cur["x"], names, truth if truth is not None and truth >= 0 else None), unsafe_allow_html=True)
-    move = {-1: "moving left", 0: "holding", 1: "moving right"}[cur["direction"]]
+    move = {-1: "pushed left", 0: "no push", 1: "pushed right"}[cur["direction"]]
     agree = snap["agreement"]
-    st.caption(f"Cursor x = {cur['x']:+.2f} ({move}); one step per decision, Left/Right Hand only. "
+    st.caption(f"Cursor x = {cur['x']:+.2f} ({move}); each Left/Right Hand decision pushes by 0.1, feet/tongue do not push, and the position leaks 5% per decision "
+               "(time constant ~5 s) so it returns to 0 when the decoder stops pushing. "
                + (f"Decision matched the intent on {100 * agree['rate']:.0f}% of the last {agree['n']} left/right chunks "
                   "(lower right after an intent change: the window lags)." if agree["n"] else ""))
     m1, m2, m3 = st.columns(3)
@@ -184,7 +185,7 @@ def live_view(engine: ProcessEngine) -> None:
     m2.metric("Sample-to-action p50 / p99", f"{s2a['p50']:.2f} / {s2a['p99']:.2f} ms")
     m3.metric("Sample-to-render p50 / p99 (this page)", f"{_pct(render, 50):.0f} / {_pct(render, 99):.0f} ms" if render else "...")
     st.caption("Sample-to-action: the newest sample of the decision existed → new cursor position computed "
-               "(stream hand-over, ring buffer, H2D copy, filter, covariance, eigh, classifier, D2H, smoothing, controller). "
+               "(stream hand-over, ring buffer, H2D copy, filter, covariance, feature and classifier stages, D2H, smoothing, controller). "
                "Sample-to-render adds this page's refresh poll (up to 250 ms); browser paint is not measured.")
 
 
@@ -209,8 +210,9 @@ with st.sidebar:
         st.caption("Real EEG needs `pip install moabb pylsl` (not installed here); the synthetic stream is used.")
 
 st.title("Real-time BCI decoder")
-st.caption("64-sample chunks every 256 ms -> ring buffer -> band-pass -> covariance -> Riemannian tangent space -> LDA "
-           "-> cursor. Not a medical device; not validated on people.")
+_decoder = "covariance -> Riemannian tangent space -> LDA" if source == "synthetic" else "filter bank -> CSP log-variance -> LDA"
+st.caption(f"64-sample chunks every 256 ms -> ring buffer -> band-pass -> {_decoder} -> cursor. "
+           "Not a medical device; not validated on people.")
 _engine = get_engine(source, subject)
 live_view(_engine)
 eeg_view(_engine)

@@ -22,6 +22,24 @@ def test_cursor_moves_with_the_decoded_class_and_clips():
     assert c.update(2, t).direction == 0 and c.update(0, t).direction == -1 and c.update(1, t).direction == 1
 
 
+def test_leaky_cursor_returns_to_zero_and_settles_at_the_decision_balance():
+    t = time.perf_counter_ns()
+    c = CursorController(NAMES4, gain=0.1, decay=0.9)
+    for _ in range(100):
+        c.update(1, t)                                            # constant right: x -> gain / (1 - decay) = 1.0
+    assert c.x == pytest.approx(1.0, abs=1e-3)
+    xs = [c.update(2, t).x for _ in range(40)]                    # feet: no push, the position leaks away
+    assert all(a > b > 0 for a, b in zip([1.0] + xs[:-1], xs)) and xs[-1] < 0.02
+    d = CursorController(NAMES4, gain=0.1, decay=0.9)
+    for i in range(400):
+        d.update(1 if i % 4 else 0, t)                            # 75% right / 25% left: x -> 0.1 * 0.5 / 0.1 = 0.5
+    assert d.x == pytest.approx(0.5, abs=0.15)
+    with pytest.raises(ValueError):
+        CursorController(NAMES4, decay=1.2)
+    with pytest.raises(ValueError):
+        CursorController(NAMES4, decay=0.0)
+
+
 def test_two_class_names_work_and_unknown_names_never_move():
     c2 = CursorController(("Left Hand", "Right Hand"), gain=0.1)
     assert c2.update(0, 0).x == pytest.approx(-0.1)

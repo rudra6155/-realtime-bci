@@ -47,18 +47,25 @@ def bandpass_cpu(x: np.ndarray, taps: np.ndarray) -> np.ndarray:
 
 
 class FIRBandpass(torch.nn.Module):
-    """``(B, T, C)`` float32 -> ``(B, C, T-K+1)`` float32, mean-removed per channel."""
+    """``(B, T, C)`` float32 -> ``(B, C, T-K+1)`` float32, mean-removed per channel.
+
+    With ``taps`` of shape ``(n_bands, K)`` (a filter bank) the output is ``(B, n_bands, C, T-K+1)``: one
+    ``conv1d`` with ``n_bands`` output channels, still no Python loop over channels or bands.
+    """
 
     def __init__(self, taps: np.ndarray) -> None:
         super().__init__()
+        taps = np.asarray(taps)
+        self.banked = taps.ndim == 2
         # conv1d is cross-correlation; flip the taps so it equals scipy's convolution.
-        kernel = torch.from_numpy(np.ascontiguousarray(taps[::-1])).to(torch.float32)
-        self.register_buffer("kernel", kernel.view(1, 1, -1))
+        kernel = torch.from_numpy(np.ascontiguousarray(taps[..., ::-1])).to(torch.float32)
+        self.register_buffer("kernel", kernel.view(-1, 1, kernel.shape[-1]))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, c = x.shape
         xc = x.permute(0, 2, 1).reshape(b * c, 1, t)       # channels folded into the batch axis
-        y = F.conv1d(xc, self.kernel).view(b, c, -1)
+        y = F.conv1d(xc, self.kernel)
+        y = y.view(b, c, -1, y.shape[-1]).permute(0, 2, 1, 3) if self.banked else y.view(b, c, -1)
         return y - y.mean(dim=-1, keepdim=True)
 
 

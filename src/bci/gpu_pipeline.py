@@ -42,7 +42,7 @@ import torch
 
 from . import (CHUNK_SAMPLES, CLASS_NAMES, FS_HZ, LATENCY_TARGET_MS, N_CHANNELS, WINDOW_SAMPLES)
 from .classifier import RiemannianLDA, RiemannianLDAParams, train_default
-from .closed_loop import CursorController, RollingAgreement, ScoreSmoother
+from .closed_loop import DEFAULT_CURSOR_DECAY, CursorController, RollingAgreement, ScoreSmoother
 from .filters import configure_precision, make_bandpass
 from .ring_buffer import RingBuffer
 from .stream import Chunk, SyntheticEEGStream
@@ -86,6 +86,12 @@ def resolve_device(device: str | torch.device = "auto") -> torch.device:
     return torch.device(device)
 
 
+def _make_model(params, device: torch.device):
+    """The torch model for ``params``: Riemannian tangent space + LDA, or filter-bank CSP + LDA."""
+    from .fbcsp import FBCSPLDA, FBCSPParams
+    return FBCSPLDA(params, device) if isinstance(params, FBCSPParams) else RiemannianLDA(params, device)
+
+
 class GPUPipeline:
     """band-pass -> covariance -> tangent space -> LDA for one decode window per chunk.
 
@@ -107,7 +113,7 @@ class GPUPipeline:
         self.profile_stages = profile_stages
         self._async = self.overlap
 
-        self.model = RiemannianLDA(params, self.device).requires_grad_(False)
+        self.model = _make_model(params, self.device).requires_grad_(False)
         self.filter, self.filter_info = make_bandpass(
             params.taps, self.device, compile, example_shape=(1, window, n_channels))
         n_cls = params.lda_w.shape[0]
@@ -318,7 +324,7 @@ class StreamingSession:
             self._make_stream = lambda: SyntheticEEGStream(seed=seed, realtime=realtime)
         else:
             raise ValueError(f"unknown source {source!r}")
-        self.n_channels = self.params.ref_inv_sqrt.shape[0]
+        self.n_channels = self.params.n_channels
         self.stream = self._make_stream()
         self.ring = RingBuffer(n_channels=self.n_channels)
         self.smoother = ScoreSmoother(smooth_k)
@@ -363,12 +369,12 @@ class LiveEngine:
     def __init__(self, params: RiemannianLDAParams | None = None, device: str = "auto",
                  seed: int = 0, history_s: float = 5.0, latency_window: int = 500,
                  compile: bool | str = "auto", source: str = "synthetic", subject: int = 1,
-                 smooth_k: int = 1, cursor_gain: float = 0.1) -> None:
+                 smooth_k: int = 1, cursor_gain: float = 0.1, cursor_decay: float = DEFAULT_CURSOR_DECAY) -> None:
         self.session = StreamingSession(params, device, realtime=True, seed=seed, compile=compile,
                                         source=source, subject=subject, smooth_k=smooth_k)
         self.tracker = LatencyTracker(latency_window)
         self.s2a = LatencyTracker(latency_window)
-        self.controller = CursorController(self.session.params.class_names, gain=cursor_gain)
+        self.controller = CursorController(self.session.params.class_names, gain=cursor_gain, decay=cursor_decay)
         self.agreement = RollingAgreement(self.controller)
         self._lock = threading.Lock()
         self._raw: collections.deque[np.ndarray] = collections.deque(

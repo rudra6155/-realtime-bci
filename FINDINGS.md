@@ -276,7 +276,7 @@ chance 0.25), 0.292, **0.657** (0..2 s), **0.722** (1..3 s), 0.642, then ~0.5. S
 ### 6.1 Accuracy and Cohen's kappa (4 classes, session T → E, artifact-free trials) — baseline decoder, no smoothing
 
 `results/real/baseline_k1/accuracy_per_subject.csv`; per-time-bin kappas `results/real/baseline_k1/kappa_timecourse.csv`;
-figure `results/real/baseline_k1/kappa_vs_competition.png`. The decoder selected afterwards (§8) is in `results/real/`. Fixed window = window ending 3.06 s after the cue (chosen a priori
+figure `results/real/baseline_k1/kappa_vs_competition.png`. The Riemannian decoder with smoothing (§8) is in `results/real/riemann_k4/`, the current default decoder (§9) in `results/real/`. Fixed window = window ending 3.06 s after the cue (chosen a priori
 from subject 1's session-T cross-validation; not tuned on E). Best time point = maximum over the 16-bin
 kappa time course (the competition's criterion was "the largest kappa value"; optimistic by construction).
 
@@ -319,8 +319,8 @@ the same 4-class scores: accuracy 0.752, kappa 0.506. Chance is accuracy 0.25 an
 
 ### 6.3 Noise log (artifacts logged, not removed)
 
-`results/real/baseline_k1/noise_log.csv` (baseline decoder; `results/real/noise_log.csv` is the same log for the
-selected decoder, only its `correct_fixed` column differs): one row per session-E trial (2592), measured over the decision window
+`results/real/baseline_k1/noise_log.csv` (baseline decoder; `results/real/riemann_k4/noise_log.csv` and `results/real/noise_log.csv` are the
+same log for the later decoders, only the `correct_fixed` column differs): one row per session-E trial (2592), measured over the decision window
 (1–3 s after the cue): EEG peak-to-peak (95th percentile over channels), fraction of samples at the
 amplifier limit (|x| ≥ 99.9 µV; the recording clips at ±100 µV), share of power above 30 Hz, EOG RMS, the
 experts' flag and whether the fixed-window prediction was right.
@@ -342,7 +342,7 @@ experts' flag and whether the fixed-window prediction was right.
   no change when the GPU-run files were pushed over the CPU-run ones, and the nine per-subject console lines
   match to the printed precision. The GPU machine took 33–79 s per subject (it includes a ~80 MB MOABB
   download per subject), the container ~25 s.
-* Real-data label latency and LSL jitter: GPU machine, five runs, §7.1.
+* Real-data label latency and LSL jitter: GPU machine, five runs with the Riemannian decoder, §7.1.
 
 ## 7. Phase 2: LSL transport and jitter
 
@@ -374,7 +374,8 @@ Container, loopback, 64-channel synthetic chunks, producer process separate, fir
 
 Each run: subject 1's session E, 1000 chunks after 50 warm-up chunks (and the 7 chunks that fill the first
 window), arriving at 1× real time through LSL from a separate process into the ring buffer and the pipeline
-(2 CUDA streams, pinned buffers, `torch.compile`d filter, 22 channels, 4 classes). Raw per-chunk files:
+(2 CUDA streams, pinned buffers, `torch.compile`d filter, 22 channels, 4 classes, **Riemannian decoder** (the only one at the time; the
+filter-bank decoder of §9 has not been measured on the GPU)). Raw per-chunk files:
 `results/real/latency_run0..4/real_latency_paced.csv`; the percentiles recomputed from all five raw files are
 identical to the five `real_latency_summary.csv` (within 1e-5 ms). Run 0 is the first GPU run (before phase 3);
 run 1 is the `real_benchmark all` run after phase 3; runs 2, 3 and 4 are `real_benchmark latency`, run 3 and 4
@@ -418,10 +419,12 @@ back to back (about 6 min apart by the console clock, which is not stored in the
 
 ## 8. Phase 3: closing the kappa gap, and the closed-loop dashboard
 
+*Status: §8.1–8.2 describe the Riemannian decoder, superseded as the default by §9 (filter-bank CSP). The cursor described in §8.3 was a pure integrator; §9.4 replaces it.*
+
 ### 8.1 What was tried, and how it was chosen (session T only)
 
 The decoder was changed only through a selection that never touches session E (protocol: SPEC.md §12.2;
-`python -m bci.real_benchmark select`, output `results/real/model_selection_T.csv` and `.log`, 24 candidates, about
+`python -m bci.real_benchmark select`, output `results/real/riemann_k4/model_selection_T.csv` and `.log`, 24 candidates, about
 4 minutes on the 4-vCPU container with `--workers 4`). Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin:
 
 | bands / window (samples) | k=1 | k=2 | k=3 | k=4 | k=6 | k=8 |
@@ -440,8 +443,9 @@ chunks adds a group delay of (k−1)/2 = 1.5 chunks = 0.38 s: the label trails t
 
 ### 8.2 Session E, scored once (container, CPU device)
 
-`python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --smooth-k 4` → `results/real/accuracy_per_subject.csv`,
-`kappa_timecourse.csv`, `noise_log.csv`, `kappa_vs_competition.png`, console log `accuracy_k4.log`. Artifact-free
+`python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --smooth-k 4 --decoder riemann` → `results/real/riemann_k4/accuracy_per_subject.csv`,
+`kappa_timecourse.csv`, `noise_log.csv`, `kappa_vs_competition.png`, console log `accuracy_k4.log` (these ran before `--decoder` existed; the
+default then was the Riemannian decoder). Artifact-free
 trials; the baseline columns are `results/real/baseline_k1/`.
 
 | subject | artifact trials (E) | accuracy (fixed) | kappa (fixed) | kappa (best time point) | at (s after cue) | kappa fixed, baseline | kappa best, baseline | 2008 winner kappa | left-vs-right accuracy |
@@ -518,3 +522,138 @@ Two things visible in those screenshots that should not be read as results:
   output direction, not a calibrated control signal.
 * The real-data panel shows 52% agreement with the intent over 79 left/right chunks. That window is short, spans
   the lag after each intent change and counts feet/tongue decisions as misses; the evaluated figure is §8.2.
+
+## 9. Phase 4: round-2 decoder selection, cursor leak, tail diagnostic, deployment check
+
+Requested after phase 3: close the four remaining gaps. What could be done in the container was done; what needs the
+GPU laptop or the user's accounts is listed in §9.7.
+
+### 9.1 Round 2 of the selection, session T only
+
+Candidates and rule were written into SPEC.md §13.1 before they were computed (`python -m bci.real_benchmark select2`,
+output `results/real/model_selection2_T.csv` and `.log`, 36 candidates, 9 subjects, about 7 min on the 4-vCPU container).
+Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin, artifact-free trials:
+
+| family, parameter | k=1 | k=2 | k=3 | k=4 | k=6 | k=8 |
+|---|---|---|---|---|---|---|
+| R: Riemannian, shrinkage 0.05 | 0.484 | 0.495 | 0.506 | 0.517 | 0.514 | 0.474 |
+| R: Riemannian, shrinkage 0.2 | 0.470 | 0.496 | 0.509 | 0.520 | 0.512 | 0.478 |
+| R: Riemannian, shrinkage 0.01 | 0.489 | 0.504 | 0.502 | 0.519 | 0.521 | 0.481 |
+| F: filter-bank CSP, features 24 | 0.495 | 0.511 | 0.538 | 0.554 | 0.561 | 0.526 |
+| F: filter-bank CSP, features 48 | 0.556 | 0.594 | 0.614 | **0.628** | 0.631 | 0.592 |
+| H: Riemannian + CSP, CSP features 24 | 0.537 | 0.548 | 0.575 | 0.587 | 0.602 | 0.558 |
+
+* **Sanity check:** the R / 0.05 row reproduces round 1's 8–30 Hz / 500-sample row to three decimals (0.484 … 0.474),
+  although the code path is new.
+* The best raw candidate is F / 48 features / k = 6 (0.631). Only F / 48 / k = 4 (0.628) is within one
+  paired standard error of it, and k = 4 is the simpler, so the declared rule selects **filter-bank CSP, 48
+  mutual-information-selected features, mean of the last 4 chunk scores**. The incumbent (R / 0.05 / k = 4, 0.517) is
+  not indistinguishable from the best: its difference is 0.114 with a paired SE of 0.048.
+* Chosen against incumbent, per subject, in session-T CV: +0.111 mean kappa (paired SE 0.048), better on 7 of 9 subjects.
+  The gain is concentrated in S5 (0.15 → 0.59 in CV) and S7 (0.64 → 0.82); S2 is lower (0.36 → 0.32).
+* **Caveats.** 36 candidates make the best raw session-T figure optimistic (the winner's family was among them on
+  purpose: it is the method of the 2008 winner). The choice was made by the declared rule, not by hand, and session E
+  played no part in it. R and F also differ in more than the feature type (nine 4 Hz bands against one 8–30 Hz band,
+  151 against 101 taps); this was not separated.
+
+### 9.2 Session E, scored once
+
+`python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --decoder fbcsp --smooth-k 4` (container, CPU device)
+→ `results/real/accuracy_per_subject.csv`, `kappa_timecourse.csv`, `noise_log.csv`, `kappa_vs_competition.png`, console
+log `accuracy_fbcsp_k4.log`. Artifact-free trials; the Riemannian columns are `results/real/riemann_k4/` and `baseline_k1/`.
+
+| subject | artifact trials (E) | accuracy (fixed) | kappa (fixed) | kappa (best time point) | at (s after cue) | kappa fixed: Riemannian k=4 | kappa fixed: Riemannian k=1 | 2008 winner kappa | left-vs-right accuracy |
+|---|---|---|---|---|---|---|---|---|---|
+| S1 | 7/288 | 0.843 | 0.791 | 0.805 | 2.80 | 0.720 | 0.687 | 0.68 | 0.858 |
+| S2 | 5/288 | 0.527 | 0.369 | 0.397 | 3.32 | 0.260 | 0.284 | 0.42 | 0.592 |
+| S3 | 15/288 | 0.846 | 0.795 | 0.795 | 3.06 | 0.726 | 0.604 | 0.75 | 0.964 |
+| S4 | 60/288 | 0.570 | 0.427 | 0.444 | 3.32 | 0.401 | 0.295 | 0.48 | 0.621 |
+| S5 | 12/288 | 0.540 | 0.387 | 0.392 | 2.80 | 0.216 | 0.188 | 0.40 | 0.859 |
+| S6 | 73/288 | 0.498 | 0.330 | 0.330 | 3.06 | 0.305 | 0.299 | 0.27 | 0.750 |
+| S7 | 11/288 | 0.830 | 0.774 | 0.774 | 3.06 | 0.692 | 0.611 | 0.77 | 0.907 |
+| S8 | 17/288 | 0.838 | 0.784 | 0.808 | 2.80 | 0.606 | 0.571 | 0.75 | 0.933 |
+| S9 | 24/288 | 0.720 | 0.626 | 0.636 | 2.80 | 0.620 | 0.570 | 0.61 | 0.869 |
+| **mean** | 224/2592 | **0.690** | **0.587** | **0.598** | | 0.505 | 0.456 | **0.57** | **0.817** |
+
+All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right kappa 0.634.
+
+* **Against the 2008 winner (0.57):** fixed-window kappa 0.587 is +0.017 above it (paired SE over subjects 0.018), best-time-point
+  0.598 is +0.028 above (SE 0.017). **That is a match, not a demonstrated win:** both differences are within about
+  one to two standard errors, and the winner's figure is one point estimate with no spread. At or above the winner
+  on S1, S3, S6, S7, S8, S9 (6 of 9) at both metrics; below on S2, S4, S5. Per-subject correlation with the winner's kappas r = 0.97.
+* **Against the previous decoders:** +0.082 over Riemannian k = 4 at the fixed window (SE 0.021, better on 9 of 9),
+  +0.075 at the best time point (SE 0.023, better on 8 of 9); +0.130 over the unsmoothed Riemannian decoder (better on 9 of 9).
+  Session-T CV had predicted +0.111.
+* The mean kappa time course now peaks at the fixed bin: 0.587 at 3.06 s, 0.579 at 3.32 s, 0.573 at 2.80 s (the fixed
+  bin was set a priori in phase 2 and not changed).
+* Flagged trials still decode worse: accuracy 0.603 (224 flagged) vs 0.697 clean.
+
+### 9.3 What this does and does not show
+
+* **Disclosure.** Round 2 was started because round 1's session-E score (0.505) was below 0.57. Session E therefore
+  influenced *whether to try again*, though never *which candidate*: every choice among candidates was made on session T
+  with a rule fixed beforehand. Across the project session E has been scored three times, once per decoder
+  (Riemannian k = 1, Riemannian k = 4, filter-bank CSP k = 4), and each decoder exactly once.
+* The comparison with 0.57 stays approximate (FINDINGS §6.2): the competition scored a causal sample-by-sample output;
+  here a decision per 256 ms chunk from a 2 s window plus a 4-chunk mean, and both numbers use a best time point chosen on E.
+* One dataset, 9 subjects, replayed recordings, no artifact removal, no person or amplifier.
+* The GPU has not run the new decoder: the 0.587 / 0.598 come from the container's CPU. The streaming code is checked
+  against a CPU reference by a test that also exists for CUDA (§9.7). Its latency on the RTX 4060 is **not measured**; on the
+  container's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms (filter-bank) against 2.18 / 16.74 ms (Riemannian),
+  one run each, which says only that the median cost is similar on CPU.
+* The filter-bank decoder has no eigendecomposition and no host synchronisation. Whether that removes the slow-chunk tail
+  of §7.1 (which sat in the float64 covariance and classifier stages) is untested.
+
+### 9.4 Cursor control law
+
+The pinned cursor of §8.3 came from the pure integrator. It now leaks, `x ← clip(0.95·x + push)` (SPEC.md §13.3; the 0.95
+was fixed before measuring). `scripts/cursor_sim.py` replays each decoder's session-E decisions, 9 subjects, through both laws
+(`results/real/cursor_sim_riemann.csv`, `cursor_sim_fbcsp.csv`):
+
+| decoder | share of decisions at an edge: pure integrator (per-subject range) | leaky | cursor on the intended side during left/right imagery: pure | leaky |
+|---|---|---|---|---|
+| Riemannian, k = 4 | 43.5% (29–76) | 8.2% (1–23) | 53.0% | 57.0% |
+| filter-bank CSP, k = 4 | 40.3% (32–56) | 7.4% (1–12) | 52.3% | 59.7% |
+
+* The leak removes most of the pinning. The cursor is still a **weak control signal**: during left/right imagery it is on the
+  intended side about 60% of the time (chance ≈ 50%), because feet and tongue decisions do not push, the 4-class decoder
+  spreads its decisions, and the window lags every intent change. It shows the decoder's direction, not calibrated control.
+
+### 9.5 Tail-latency diagnostic
+
+`python -m bci.tail_diag` (SPEC.md §13.4) was built for the GPU laptop. Tested here: the analysis logic, the GC log, the telemetry
+no-op without `nvidia-smi`, and a CPU run on a stand-in recording and on real data. Not run on a GPU, so **the cause stays open**
+(CLAIMS P24). Runs to do on the RTX 4060, each about 5 minutes:
+
+```
+python -m bci.tail_diag --out-dir results\real\tail_diag_baseline
+python -m bci.tail_diag --no-gc --out-dir results\real\tail_diag_nogc
+python -m bci.tail_diag --priority high --out-dir results\real\tail_diag_highprio
+python -m bci.tail_diag --no-telemetry --out-dir results\real\tail_diag_notele
+python -m bci.tail_diag --decoder fbcsp --out-dir results\real\tail_diag_fbcsp
+```
+Reading the summary: a long `host_launch_pre_ms` on slow chunks means the Python thread stalled while enqueuing (scheduling, GIL, GC);
+a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` points at clocks or throttling; fewer slow chunks with
+`--no-gc` or `--priority high` points at those causes. Runs can be tail-free by chance (runs 0 and 4 of §7.1 were), so repeat before concluding.
+
+### 9.6 Deployment checks
+
+* **Docker.** The repo's `Dockerfile` was built **unmodified** and run on CPU. The sandbox needed three workarounds, none in the repo:
+  a Docker daemon started inside it (`dockerd`); `python:3.11-slim` pulled from Google's public mirror (`mirror.gcr.io/library/python:3.11-slim`,
+  digest `sha256:673719e0…`) because Docker Hub answered 429; and the sandbox proxy's CA added in a local base layer so `pip` could verify TLS. The
+  build took about 21 minutes and the image is 10.8 GB (3.6 GB compressed content), mostly the CUDA libraries that PyPI's default `torch` wheel
+  pulls in. Run with `--network=host`: `/_stcore/health` answered 200, `torch 2.15.0+cu132` imports with CUDA unavailable, and headless
+  Chromium showed the dashboard (synthetic source only, `Device: CPU`, cursor and sample-to-action metrics, no exception). The image held the
+  phase-3 code; the final code was checked in the same image with `src` and `app` mounted over the installed copies.
+* **Hugging Face path.** `requirements.txt` alone was installed into a clean Python 3.13.17 virtual environment (torch 2.15.0+cpu, numpy, scipy,
+  scikit-learn, streamlit, plotly: no fastapi, onnx or MOABB) and `streamlit run app/dashboard.py` served the final dashboard with no exception.
+* **Not done:** a real Space (needs the user's Hugging Face account), `docker run --gpus all`, `docker-compose.yml`, and the GitHub Actions workflow
+  (never executed). The real-data source is absent from both CPU deployments because MOABB is not in their dependencies; the page says so.
+
+### 9.7 Open after phase 4
+
+1. Run on the RTX 4060 (commands in the final report): the new tests (CUDA variant of the filter-bank equivalence test), the 9-subject accuracy run
+   with the filter-bank decoder, its real-data latency (`real_benchmark latency --decoder fbcsp`), and its sample-to-action in the dashboard engine.
+2. The tail diagnostic runs of §9.5 (cause of the slow chunks).
+3. A real Hugging Face Space and `docker run --gpus all`.
+4. Beyond this project's reach from the container: any real amplifier or participant.

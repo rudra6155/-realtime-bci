@@ -4,7 +4,8 @@
     python -m bci.real_benchmark latency  --subject 1 --out-dir results/real      # needs LSL; GPU for real numbers
     python -m bci.real_benchmark all
 
-Protocol (SPEC.md section 11): per subject, train the Riemannian + LDA decoder on session T (all 288 trials,
+Protocol (SPEC.md section 11): per subject, train the decoder (``--decoder``: filter-bank CSP + LDA by default, or the
+Riemannian + LDA decoder of phases 2/3) on session T (all 288 trials,
 9 windows per trial), then stream session E run by run through the *same* ring buffer + pipeline used for the
 latency benchmark and score the per-chunk predictions against the cue-aligned trial labels.
 """
@@ -57,10 +58,21 @@ def training_windows(rec: Recording, starts_s=TRAIN_START_S) -> tuple[np.ndarray
     return np.stack(xs), np.array(ys)
 
 
-def train_subject(subject: int, rec_train: Recording | None = None) -> RiemannianLDAParams:
+DECODERS = ("fbcsp", "riemann")
+DEFAULT_DECODER = "fbcsp"          # chosen by the session-T selection of SPEC.md section 13 (round 2)
+
+
+def train_subject(subject: int, rec_train: Recording | None = None, decoder: str = DEFAULT_DECODER):
+    """Train one subject on session T. ``decoder``: ``fbcsp`` (filter-bank CSP + MI selection + LDA, 48 features) or
+    ``riemann`` (8-30 Hz covariance -> tangent space -> LDA, the phase-2/3 decoder)."""
+    if decoder not in DECODERS:
+        raise ValueError(f"decoder must be one of {DECODERS}")
     rec = rec_train if rec_train is not None else load_bciciv2a(subject, "0train")
     x, y = training_windows(rec)
-    return fit(x, y, class_names=BCICIV2A_CLASSES)
+    if decoder == "riemann":
+        return fit(x, y, class_names=BCICIV2A_CLASSES)
+    from .fbcsp import fit_fbcsp
+    return fit_fbcsp(x, y, fs=rec.fs, class_names=BCICIV2A_CLASSES)
 
 
 # ----------------------------------------------------------------------------------- streaming evaluation
@@ -153,12 +165,13 @@ def parse_subjects(text: str) -> list[int]:
     return out
 
 
-def run_accuracy(subjects: list[int], device: str, out_dir: Path, smooth_k: int = 1) -> list[dict]:
+def run_accuracy(subjects: list[int], device: str, out_dir: Path, smooth_k: int = 1,
+                 decoder: str = DEFAULT_DECODER) -> list[dict]:
     out_dir.mkdir(parents=True, exist_ok=True)
     per_subject, tc_rows, noise_rows = [], [], []
     for s in subjects:
         t0 = time.time()
-        params = train_subject(s)
+        params = train_subject(s, decoder=decoder)
         rec_e = load_bciciv2a(s, "1test")
         preds = stream_session(params, rec_e, device, smooth_k=smooth_k)
         scores, labels, art, _ = trial_bin_scores(rec_e, preds)
@@ -239,13 +252,14 @@ def plot_kappa(per_subject: list[dict], path: Path) -> None:
 
 
 # ----------------------------------------------------------------------------------- latency + jitter through LSL
-def run_latency(subject: int, device: str, chunks: int, warmup: int, out_dir: Path, compile: bool | str = "auto") -> dict:
+def run_latency(subject: int, device: str, chunks: int, warmup: int, out_dir: Path, compile: bool | str = "auto",
+                decoder: str = DEFAULT_DECODER) -> dict:
     """Real recordings arrive at 1x real time through LSL (producer in another process) into the ring buffer and
     the pipeline; measures label latency and LSL jitter in the same run."""
     from .lsl_stream import LSLChunkSource, TimedRingBuffer, finish_producer, jitter_stats, new_source_id, spawn_producer
     out_dir.mkdir(parents=True, exist_ok=True)
     import pylsl
-    params = train_subject(subject)
+    params = train_subject(subject, decoder=decoder)
     dev = resolve_device(device)
     pipe = GPUPipeline(params, dev, n_channels=22, compile=compile)
     pipe.warmup()
@@ -366,6 +380,112 @@ def select_config(subjects: list[int], workers: int = 4) -> list[dict]:
     return rows
 
 
+# ----------------------------------------------------------------------------------- model selection, round 2 (session T only)
+# Declared in SPEC.md section 13.1 before it was run: families R (Riemannian), F (filter-bank CSP), H (both).
+R2_SHRINK = (0.05, 0.2, 0.01)                              # family R: covariance shrinkage, in simplicity order
+R2_D = (24, 48)                                            # family F: number of MI-selected features, in simplicity order
+R2_H_D = 24                                                # family H: FBCSP features appended to the tangent features
+R2_FAMILY_RANK = {"R": 0, "F": 1, "H": 2}
+
+
+def _select2_subject(subject: int) -> dict:
+    """Leave-one-run-out CV on session T: scores at all 16 bins for every trial, for every family member (k not applied)."""
+    from scipy.signal import firwin
+    from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+    from sklearn.feature_selection import mutual_info_classif
+    from . import classifier as C
+    from . import fbcsp
+    from .filters import bandpass_cpu
+    rec = load_bciciv2a(subject, "0train")
+    fs, win = rec.fs, WINDOW_SAMPLES
+    starts = np.arange(0.0, (4.0 - win / fs) + 1e-9, 0.25)
+    tr_w, tr_y, tr_run, ev_w = [], [], [], []
+    for r, run in enumerate(rec.runs):
+        for cue, lab in zip(run.cue_samples, run.labels):
+            for st in starts:
+                a = int(cue) + int(round(st * fs)); tr_w.append(run.eeg[a:a + win])
+            tr_y += [int(lab)] * len(starts); tr_run += [r] * len(starts)
+            for j in range(N_BINS):
+                end = int(round((int(cue) + int(round(fs * (BIN_FIRST_END_S + j * BIN_S)))) / CHUNK_SAMPLES)) * CHUNK_SAMPLES
+                ev_w.append(run.eeg[end - win:end])
+    tr_w, ev_w, tr_y, tr_run = np.stack(tr_w), np.stack(ev_w), np.array(tr_y), np.array(tr_run)
+    ns = len(starts); n_tr = len(tr_y) // ns
+    trial_y, trial_run = tr_y[::ns], tr_run[::ns]
+
+    def cov_in_chunks(x, taps, fn):
+        return np.concatenate([fn(bandpass_cpu(x[i:i + 1024], taps)) for i in range(0, len(x), 1024)])
+
+    # family R: tangent features of the 8-30 Hz band for each shrinkage (reference mean from one window per trial, as in round 1)
+    taps = firwin(101, [8, 30], pass_zero=False, fs=fs, window="hamming")
+    tang = {}
+    for shrink in R2_SHRINK:
+        ctr = cov_in_chunks(tr_w, taps, lambda y: C.covariance_cpu(y, shrink))
+        cev = cov_in_chunks(ev_w, taps, lambda y: C.covariance_cpu(y, shrink))
+        ris = C._sym_fn(C.riemann_mean(ctr[::ns]), lambda w: w ** -0.5)
+        tang[shrink] = (C.tangent_cpu(ctr, ris), C.tangent_cpu(cev, ris))
+    # family F / H: trace-normalised covariances of the nine 4 Hz bands
+    fb_tr, fb_ev = [], []
+    for t in fbcsp.fb_taps(fs):
+        fb_tr.append(cov_in_chunks(tr_w, t, fbcsp.trace_normalised_cov))
+        fb_ev.append(cov_in_chunks(ev_w, t, fbcsp.trace_normalised_cov))
+
+    cands = [("R", sh) for sh in R2_SHRINK] + [("F", d) for d in R2_D] + [("H", R2_H_D)]
+    scores = {c: np.zeros((n_tr, N_BINS, 4)) for c in cands}
+    for held in sorted(set(trial_run.tolist())):
+        tr = tr_run != held; idx = np.where(trial_run == held)[0]
+        ev_idx = (idx[:, None] * N_BINS + np.arange(N_BINS)[None]).ravel()
+        model = fbcsp.FBCSP(n_classes=4).fit([c[tr] for c in fb_tr], tr_y[tr])
+        f_tr, f_ev = model.transform([c[tr] for c in fb_tr]), model.transform([c[ev_idx] for c in fb_ev])
+        order = np.argsort(-mutual_info_classif(f_tr, tr_y[tr], n_neighbors=3, random_state=0))
+
+        def lda_scores(ftr, fev):
+            lda = LinearDiscriminantAnalysis(solver="lsqr", shrinkage="auto").fit(ftr, tr_y[tr])
+            return lda.decision_function(fev).reshape(len(idx), N_BINS, 4)
+
+        for sh in R2_SHRINK:
+            scores[("R", sh)][idx] = lda_scores(tang[sh][0][tr], tang[sh][1][ev_idx])
+        for d in R2_D:
+            scores[("F", d)][idx] = lda_scores(f_tr[:, order[:d]], f_ev[:, order[:d]])
+        top = order[:R2_H_D]
+        scores[("H", R2_H_D)][idx] = lda_scores(np.hstack([tang[0.05][0][tr], f_tr[:, top]]),
+                                                np.hstack([tang[0.05][1][ev_idx], f_ev[:, top]]))
+    art = np.array([bool(a) for run in rec.runs for a in run.artifact])
+    return {"scores": scores, "labels": trial_y, "artifact": art}
+
+
+def select_round2(subjects: list[int], workers: int = 4) -> list[dict]:
+    """Round 2 of the session-T-only selection (rule and candidates: SPEC.md section 13.1; session E is never loaded)."""
+    from multiprocessing import Pool
+    with Pool(min(workers, len(subjects))) as pool:
+        data = pool.map(_select2_subject, subjects)
+    members = [("R", sh) for sh in R2_SHRINK] + [("F", d) for d in R2_D] + [("H", R2_H_D)]
+    order_of = {m: i for i, m in enumerate(members)}
+    cands = [(m, k) for m in members for k in SELECT_K]
+
+    def kappa(d: dict, c: tuple) -> float:
+        sm = d["scores"][c[0]][:, max(0, FIXED_BIN - c[1] + 1):FIXED_BIN + 1].mean(axis=1)
+        keep = ~d["artifact"]
+        return float(cohen_kappa_score(d["labels"][keep], sm[keep].argmax(1)))
+
+    per = {c: np.array([kappa(d, c) for d in data]) for c in cands}
+    best = max(cands, key=lambda c: per[c].mean())
+    rows = []
+    for c in cands:
+        diff = per[best] - per[c]
+        se = float(diff.std(ddof=1) / np.sqrt(len(diff))) if len(diff) > 1 else 0.0
+        fam, par = c[0]
+        rows.append({"family": fam, "param": par, "smooth_k": c[1], "mean_kappa_T_cv": float(per[c].mean()),
+                     "diff_to_best": float(diff.mean()), "paired_se": se, "indistinguishable": bool(diff.mean() <= se),
+                     "_rank": (R2_FAMILY_RANK[fam], order_of[c[0]], c[1])})
+    chosen = min((r for r in rows if r["indistinguishable"]), key=lambda r: r["_rank"])
+    for r in rows:
+        r["chosen"] = r is chosen
+        del r["_rank"]
+    for r, c in zip(rows, cands):
+        r["per_subject_kappa"] = " ".join(f"{v:.4f}" for v in per[c])
+    return rows
+
+
 # ----------------------------------------------------------------------------------- alignment check
 def offset_check(subject: int = 1, starts_s=tuple(np.arange(-2.0, 6.01, 1.0))) -> list[tuple[float, float]]:
     """Cross-validated (5-fold, session T) 4-class accuracy of a 2 s window starting ``start`` seconds after the
@@ -426,12 +546,18 @@ def main(argv: list[str] | None = None) -> int:
         sp.add_argument("--chunks", type=int, default=1000)
         sp.add_argument("--warmup", type=int, default=50)
         sp.add_argument("--allow-cpu", action="store_true", help="latency on a CPU device (smoke test; files get a cpu_smoke_ prefix)")
+        sp.add_argument("--decoder", choices=DECODERS, default=DEFAULT_DECODER,
+                        help="fbcsp (selected in round 2, default) or riemann (the phase 2/3 decoder)")
         sp.add_argument("--smooth-k", type=int, default=DEFAULT_SMOOTH_K["real"],
                         help="accuracy: decision = mean of the last k chunk scores (default: the value chosen by 'select' on session T)")
     se = sub.add_parser("select", help="choose the decoder configuration by CV on session T only (never loads session E)")
     se.add_argument("--subjects", default="1-9")
     se.add_argument("--workers", type=int, default=4)
     se.add_argument("--out-dir", default="results/real")
+    s2 = sub.add_parser("select2", help="round 2 of the session-T-only selection: Riemannian shrinkage, filter-bank CSP, hybrid (SPEC 13.1)")
+    s2.add_argument("--subjects", default="1-9")
+    s2.add_argument("--workers", type=int, default=4)
+    s2.add_argument("--out-dir", default="results/real")
     oc = sub.add_parser("offset-check", help="CV accuracy vs window offset after the annotation (cue alignment check)")
     oc.add_argument("--subject", type=int, default=1)
     args = p.parse_args(argv)
@@ -448,6 +574,23 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nchosen by the pre-declared rule: {c['config']}, window {c['window_samples']} samples, smooth k={c['smooth_k']} "
               f"(T-CV kappa {c['mean_kappa_T_cv']:.3f})")
         return 0
+    if args.cmd == "select2":
+        rows = select_round2(parse_subjects(args.subjects), args.workers)
+        out = Path(args.out_dir); out.mkdir(parents=True, exist_ok=True)
+        _write_csv(out / "model_selection2_T.csv", rows)
+        print("session-T leave-one-run-out kappa at the fixed bin (mean over subjects); one row per family member, columns: smoothing k")
+        seen = []
+        for r in rows:
+            key = (r["family"], r["param"])
+            if key not in seen:
+                seen.append(key)
+        for key in seen:
+            print(f"  {key[0]} {str(key[1]):>5s} " + "".join(f"  k={r['smooth_k']}: {r['mean_kappa_T_cv']:.3f}"
+                                                         for r in rows if (r["family"], r["param"]) == key))
+        c = next(r for r in rows if r["chosen"])
+        print(f"\nchosen by the declared rule: family {c['family']}, param {c['param']}, smooth k={c['smooth_k']} "
+              f"(T-CV kappa {c['mean_kappa_T_cv']:.3f})")
+        return 0
     if args.cmd == "offset-check":
         print(f"subject {args.subject}, session T: 5-fold CV 4-class accuracy of a 2 s window starting at offset (s) after the annotation (chance 0.25)")
         for st, acc in offset_check(args.subject):
@@ -456,13 +599,13 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out_dir)
     status = 0
     if args.cmd in ("accuracy", "all"):
-        per_subject = run_accuracy(parse_subjects(args.subjects), args.device, out, args.smooth_k)
+        per_subject = run_accuracy(parse_subjects(args.subjects), args.device, out, args.smooth_k, args.decoder)
         _print_accuracy(per_subject)
     if args.cmd in ("latency", "all"):
         if resolve_device(args.device).type != "cuda" and not args.allow_cpu:
             print("\nlatency: no CUDA device; refusing to write GPU latency files (use --allow-cpu for a smoke test).", file=sys.stderr)
             return 2
-        summ = run_latency(args.subject, args.device, args.chunks, args.warmup, out)
+        summ = run_latency(args.subject, args.device, args.chunks, args.warmup, out, decoder=args.decoder)
         _print_latency(summ)
         status = 0 if (summ["e2e_ms"]["p99"] < LATENCY_TARGET_MS and summ["jitter"]["jitter_std_ms"] < 1.0) else 1
     return status

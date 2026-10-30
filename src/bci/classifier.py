@@ -83,6 +83,10 @@ class RiemannianLDAParams:
     def n_features(self) -> int:
         return self.lda_w.shape[1]
 
+    @property
+    def n_channels(self) -> int:
+        return self.ref_inv_sqrt.shape[0]
+
 
 def features_cpu(params: RiemannianLDAParams, x: np.ndarray) -> dict[str, np.ndarray]:
     """Full CPU reference for windows ``x (B, T, C)``: filtered, covariance, features, scores."""

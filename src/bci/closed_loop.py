@@ -1,12 +1,17 @@
 """Closed-loop control: a 1-D cursor driven by the decoded class, with sample-to-action latency.
 
 Every decision (one per 256 ms chunk) moves the cursor one step: ``Left Hand`` -> left, ``Right Hand`` ->
-right, any other class (feet, tongue, ...) -> hold. The position is clipped to [-1, 1].
+right, any other class (feet, tongue, ...) -> no push. The position is a leaky integrator,
+``x <- clip(decay * x + gain * direction, -1, 1)``: with ``decay < 1`` it drifts back to 0 when the decoder
+stops pushing, so it does not stay pinned at an edge after a burst of one-sided decisions. ``decay = 1`` is a
+plain integrator. In steady state ``x`` is ``gain * (share of right - share of left decisions) / (1 - decay)``
+(clipped), i.e. a window of about ``1 / (1 - decay)`` decisions.
 
 **Sample-to-action latency** = time from the moment the *newest sample used by the decision existed* (the
 chunk's completion time, ``Chunk.t_emit_ns``) to the moment the new cursor position has been computed (the
-action). It covers stream hand-over, ring-buffer write, host-to-device copy, filter, covariance, ``eigh``,
-classifier, device-to-host copy, optional score smoothing and the controller update. It does **not** cover
+action). It covers stream hand-over, ring-buffer write, host-to-device copy, filter, covariance, the feature and
+classifier stages (``eigh`` for the Riemannian decoder), device-to-host copy, optional score smoothing and the
+controller update. It does **not** cover
 the window's own length (the decoder needs ~2 s of data: a label trails the user's intent by about that
 long), the browser, or the screen. The dashboard adds a server-side *sample-to-render* estimate on top.
 """
@@ -20,8 +25,11 @@ from dataclasses import dataclass
 import numpy as np
 
 # Decision smoothing (chunks averaged) per data source. The real-data value is chosen by cross-validation on
-# session T only (FINDINGS.md section 8); synthetic data is not smoothed.
+# session T only (FINDINGS.md sections 8 and 9: k = 4 in both rounds); synthetic data is not smoothed.
 DEFAULT_SMOOTH_K = {"synthetic": 1, "real": 4}
+# Cursor leak used by the dashboard engine: a design choice made before looking at any data (time constant
+# 1 / (1 - 0.95) = 20 decisions = 5.1 s), not a tuned value.
+DEFAULT_CURSOR_DECAY = 0.95
 
 
 @dataclass(frozen=True)
@@ -40,10 +48,14 @@ class CursorUpdate:
 
 
 class CursorController:
-    """Maps decoded class indices to cursor steps. ``gain`` is the step size per decision."""
+    """Maps decoded class indices to cursor steps. ``gain`` is the step size per decision, ``decay`` the factor
+    applied to the previous position (1.0 = no leak)."""
 
     def __init__(self, class_names: tuple[str, ...], gain: float = 0.1,
-                 left: str = "Left Hand", right: str = "Right Hand") -> None:
+                 left: str = "Left Hand", right: str = "Right Hand", decay: float = 1.0) -> None:
+        if not 0.0 < decay <= 1.0:
+            raise ValueError("decay must be in (0, 1]")
+        self.decay = decay
         self.class_names = tuple(class_names)
         self.left_idx = self.class_names.index(left) if left in self.class_names else None
         self.right_idx = self.class_names.index(right) if right in self.class_names else None
@@ -56,7 +68,7 @@ class CursorController:
 
     def update(self, label: int, t_sample_ns: int) -> CursorUpdate:
         direction = self.direction_of(label)
-        self.x = float(np.clip(self.x + self.gain * direction, -1.0, 1.0))
+        self.x = float(np.clip(self.decay * self.x + self.gain * direction, -1.0, 1.0))
         t_action_ns = time.perf_counter_ns()
         wall = time.time()
         update = CursorUpdate(self.x, direction, self.decisions, t_sample_ns, t_action_ns,

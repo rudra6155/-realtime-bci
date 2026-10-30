@@ -1,0 +1,9 @@
+session-T leave-one-run-out kappa at the fixed bin (mean over subjects); one row per family member, columns: smoothing k
+  R  0.05   k=1: 0.484  k=2: 0.495  k=3: 0.506  k=4: 0.517  k=6: 0.514  k=8: 0.474
+  R   0.2   k=1: 0.470  k=2: 0.496  k=3: 0.509  k=4: 0.520  k=6: 0.512  k=8: 0.478
+  R  0.01   k=1: 0.489  k=2: 0.504  k=3: 0.502  k=4: 0.519  k=6: 0.521  k=8: 0.481
+  F    24   k=1: 0.495  k=2: 0.511  k=3: 0.538  k=4: 0.554  k=6: 0.561  k=8: 0.526
+  F    48   k=1: 0.556  k=2: 0.594  k=3: 0.614  k=4: 0.628  k=6: 0.631  k=8: 0.592
+  H    24   k=1: 0.537  k=2: 0.548  k=3: 0.575  k=4: 0.587  k=6: 0.602  k=8: 0.558
+
+chosen by the declared rule: family F, param 48, smooth k=4 (T-CV kappa 0.628)
