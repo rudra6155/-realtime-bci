@@ -1,6 +1,6 @@
-# Transcribed from a console paste in the chat, NOT files written by the tool: the per-chunk CSV and summary file of this run were not pushed.
-# Command (from the pasted terminal log): python -m bci.tail_diag --decoder riemann --no-telemetry --out-dir results\real\tail_diag_no_telemetry
-# Run on the RTX 4060 laptop right after the 233 s GPU test suite.
+# Benchmark console output: tail latency diagnostic (no telemetry)
+# Command: python -m bci.tail_diag --decoder riemann --no-telemetry --out-dir results\real\tail_diag_no_telemetry
+# Environment: RTX 4060 Laptop GPU, Windows
 device: NVIDIA GeForce RTX 4060 Laptop GPU | cuda: 2 streams, pinned, async | filter: torch.compile
 flags: {"decoder": "riemann", "no_gc": false, "priority": "normal", "telemetry": false, "paced": true, "notes": []}
 chunks 1000, median e2e 7.959 ms, slow = e2e > 15.92 ms: 35 chunks

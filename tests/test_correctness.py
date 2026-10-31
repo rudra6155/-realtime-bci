@@ -2,7 +2,7 @@
 
 Each test is parametrized over devices; the ``cuda`` cases skip without CUDA (or fail with
 BCI_REQUIRE_CUDA=1). On a machine without CUDA this therefore only checks torch-on-CPU
-against scipy, which is what CLAIMS.md says.
+against scipy reference implementation.
 """
 
 from __future__ import annotations

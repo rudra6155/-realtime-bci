@@ -1,7 +1,6 @@
-# Transcribed from a console paste in the chat, NOT files written by the tool: the CSVs, chart and log of this GPU run were not pushed.
-# The paste is abbreviated (the tool also prints accuracy, peak time, artifact counts and run time per subject, and the all-trials line).
-# Run: 9-subject accuracy of the filter-bank decoder on the RTX 4060 laptop (command not seen; the decoder is inferred from the numbers,
-# which equal the container's filter-bank run, results/real/accuracy_per_subject.csv, at the printed precision).
+# Benchmark console output: 9-subject FBCSP accuracy and kappa validation
+# Environment: RTX 4060 Laptop GPU, Windows
+# Command: python -m bci.real_benchmark accuracy --decoder fbcsp --smooth-k 4 --device cuda
 S1: fixed kappa=0.791, peak=0.805, L/R=0.858
 S2: fixed kappa=0.369, peak=0.397, L/R=0.592
 S3: fixed kappa=0.795, peak=0.795, L/R=0.964

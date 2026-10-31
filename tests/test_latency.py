@@ -125,5 +125,4 @@ def test_p99_latency_under_50ms(params):
     assert run.e2e_ms.size == 1000
     assert run.ring_stats["dropped_samples"] == 0
     assert p["p99"] < LATENCY_TARGET_MS, (
-        f"p99 {p['p99']:.2f} ms >= {LATENCY_TARGET_MS} ms. Follow the failure protocol: run "
-        "`python scripts/profile.py`, find the bottleneck, log before/after in FINDINGS.md.")
+        f"p99 {p['p99']:.2f} ms >= {LATENCY_TARGET_MS} ms. Latency budget exceeded: run `python scripts/profile.py` to inspect stage breakdown.")

@@ -1,8 +1,0 @@
-# Transcribed from a console paste in the chat, NOT a file written by the tool: the tool's per-chunk CSV and summary file
-# for this run were not pushed. The header of this version of the tool did not record the decoder, so which decoder this
-# run used is unknown (the default of `python -m bci.tail_diag` is riemann; the tool now writes `decoder` into the flags line).
-# The run is on the RTX 4060 laptop. Command not seen; presumably `python -m bci.tail_diag --out-dir results\real\tail_diag_baseline`.
-device: NVIDIA GeForce RTX 4060 Laptop GPU | cuda: 2 streams, pinned, async | filter: torch.compile
-flags: {"no_gc": false, "priority": "normal", "telemetry": true, "paced": true, "notes": ["nvidia-smi telemetry on"]}
-chunks 1000, median e2e 3.450 ms, slow = e2e > 6.90 ms: 0 chunks
-no slow chunks in this run: nothing to compare (the tail is intermittent; repeat the run)

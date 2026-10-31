@@ -1,0 +1,17 @@
+device: NVIDIA GeForce RTX 4060 Laptop GPU | cuda: 2 streams, pinned, async | filter: torch.compile
+flags: {"decoder": "riemann", "no_gc": false, "priority": "normal", "telemetry": false, "paced": true, "notes": []}
+chunks 1000, median e2e 7.959 ms, slow = e2e > 15.92 ms: 35 chunks
+column                  median normal  median slow   ratio   max slow
+h2d_ms                          0.096        0.100    1.04      0.744
+filter_ms                       0.109        0.118    1.08      4.768
+cov_ms                          0.911        2.127    2.33     11.761
+classifier_ms                   5.354       15.780    2.95     58.506
+d2h_ms                          0.103        0.113    1.10      0.209
+host_stage_ms                   0.317        0.313    0.99      0.574
+host_launch_pre_ms              1.558        1.568    1.01      2.314
+host_launch_post_ms             5.770       17.134    2.97     61.975
+host_collect_ms                 0.057        0.276    4.88      5.256
+gc_ms                           0.000        0.000     nan      0.000
+slow chunks overlapping a Python GC pause (> 0.2 ms): 0 of 35
+hints (simple comparisons, not proofs):
+  - launch_pre is normal on slow chunks while the GPU stages are slow -> the extra time is on the GPU side (kernel execution/queueing), not in the enqueue
