@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>realtime-bci</title>
+<meta name="description" content="Real-time EEG decoding on a GPU: ring buffer, pinned memory, two CUDA streams, band-pass, covariance, classifier. Measured on a laptop RTX 4060 and on BCI Competition IV 2a.">
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1c1d1f; --muted: #5d6169; --line: #dcdde0; --card: #ffffff; --accent: #1f5fbf;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #131416; --fg: #e8e9eb; --muted: #9a9ea6; --line: #2d2f34; --card: #1a1b1e; --accent: #7fb0ff; }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 16px 72px; }
+  h1 { font-size: 2rem; margin: 0 0 4px; letter-spacing: -0.01em; }
+  h2 { font-size: 1.25rem; margin: 48px 0 12px; }
+  p { margin: 0 0 14px; }
+  a { color: var(--accent); }
+  .sub { color: var(--muted); margin-bottom: 28px; }
+  figure { margin: 24px 0; }
+  figure img { display: block; width: 100%; height: auto; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  figcaption { color: var(--muted); font-size: 0.9rem; margin-top: 8px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.95rem; background: var(--card); }
+  th, td { text-align: left; padding: 10px 12px; border: 1px solid var(--line); vertical-align: top; }
+  th { font-weight: 600; }
+  ul { padding-left: 1.2rem; margin: 0 0 14px; }
+  li { margin-bottom: 8px; }
+  pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px; overflow-x: auto; font-size: 0.85rem; line-height: 1.5; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { .grid { grid-template-columns: 1fr; } h1 { font-size: 1.6rem; } }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>realtime-bci</h1>
+  <p class="sub">Real-time EEG decoding on a GPU, with a closed-loop dashboard.</p>
+
+  <p>Chunks of 64 samples (256 ms at 250&nbsp;Hz) go through a ring buffer into pinned memory, then through two CUDA
+  streams: band-pass filter, covariance, classifier. The decoder runs on a synthetic generator and on the public
+  BCI Competition IV 2a motor-imagery recordings, replayed directly or through Lab Streaming Layer. It has never
+  run on a real amplifier or a live participant.</p>
+
+  <p><a href="https://github.com/rudra6155/-realtime-bci">Source and documentation on GitHub</a></p>
+
+  <figure>
+    <img src="assets/dashboard_demo_real_cpu.gif" alt="Dashboard replaying subject 1 of BCI Competition IV 2a: predicted class, latency gauge, cursor and raw EEG" width="860" height="725">
+    <figcaption>The dashboard replaying subject 1 of BCI Competition IV 2a. Recorded on a CPU host.</figcaption>
+  </figure>
+
+  <h2>Results</h2>
+  <div class="scroll">
+  <table>
+    <thead><tr><th>What</th><th>Result</th><th>Setup</th></tr></thead>
+    <tbody>
+      <tr><td>End-to-end latency, 64 channels, synthetic, one chunk every 256&nbsp;ms</td><td>p99 <strong>23.4&nbsp;ms</strong> (target 50&nbsp;ms)</td><td>RTX 4060 laptop, 1000 chunks</td></tr>
+      <tr><td>Real EEG over LSL, Riemannian decoder</td><td>median 4.1&ndash;7.3&nbsp;ms, p99 6.5&ndash;26.0&nbsp;ms over six runs; LSL jitter 0.05&ndash;0.08&nbsp;ms</td><td>same laptop, 22 channels</td></tr>
+      <tr><td>4-class Cohen&rsquo;s kappa, BCI Competition IV 2a, 9 subjects, train on session T, test on session E</td><td><strong>0.587</strong> at a fixed window, <strong>0.598</strong> at the best time point</td><td>filter-bank CSP + LDA</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p style="margin-top:14px">The 2008 competition winner scored 0.57. The difference here is +0.017 with a paired standard error of
+  0.018 over the nine subjects, so this is a match, not a win. The comparison is approximate: the competition
+  scored a sample-by-sample causal output, this project scores one decision per chunk from a 2&nbsp;s window plus a
+  4-chunk mean. Scores are on the experts&rsquo; artifact-free trials, as in the competition. No artifact removal is
+  applied and the EOG channels are not used for decoding.</p>
+
+  <h2>Figures</h2>
+  <div class="grid">
+    <figure>
+      <img src="assets/latency_histogram.png" alt="Histogram of end-to-end latency for the synthetic benchmark runs" width="640" height="480" loading="lazy">
+      <figcaption>Latency histogram of the synthetic benchmark runs, RTX 4060 laptop.</figcaption>
+    </figure>
+    <figure>
+      <img src="assets/kappa_vs_competition.png" alt="Per-subject kappa of the decoder at a fixed window and at the best time point, next to the 2008 winner" loading="lazy">
+      <figcaption>Per-subject kappa next to the 2008 winner, filter-bank CSP decoder.</figcaption>
+    </figure>
+  </div>
+  <figure>
+    <img src="assets/closed_loop_real_fbcsp_cpu.png" alt="Closed-loop dashboard with a cursor, sample-to-action latency and raw EEG for real data" loading="lazy">
+    <figcaption>The closed-loop view on real EEG: a cursor that follows the decoded class, and sample-to-action latency. CPU host.</figcaption>
+  </figure>
+
+  <h2>What to know before quoting the numbers</h2>
+  <ul>
+    <li>The CUDA stream overlap did not reduce latency. The copy and kernel overlap is tiny (7&nbsp;&micro;s of an 11&nbsp;&micro;s copy), and the look-ahead variant is slower than the plain baseline.</li>
+    <li>The real-data p99 moves between runs. In three of six runs about 1&ndash;2% of chunks ran several times slower. A diagnostic run excluded Python garbage collection and the host enqueue; the cause is open.</li>
+    <li>The filter-bank decoder&rsquo;s accuracy is verified on the GPU, but its latency has not been measured there. The latency runs above all used the Riemannian decoder.</li>
+    <li>All timings come from one laptop with other applications open.</li>
+  </ul>
+
+  <h2>Run it</h2>
+<pre><code>pip install torch==2.10.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -e ".[dev]"
+python -m pytest -v -rs
+python -m bci.gpu_pipeline benchmark --chunks 1000 --warmup 50 --runs overlap,baseline,paced --out-dir results
+python -m streamlit run app/dashboard.py</code></pre>
+  <p>Design decisions are in <a href="https://github.com/rudra6155/-realtime-bci/blob/main/SPEC.md">SPEC.md</a>, measurements and
+  what went wrong in <a href="https://github.com/rudra6155/-realtime-bci/blob/main/FINDINGS.md">FINDINGS.md</a>, and every claim with
+  its status and evidence in <a href="https://github.com/rudra6155/-realtime-bci/blob/main/CLAIMS.md">CLAIMS.md</a>.</p>
+
+  <footer>MIT licensed. &copy; 2026 Rudra Singh.</footer>
+</main>
+</body>
+</html>

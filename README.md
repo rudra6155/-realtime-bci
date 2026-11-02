@@ -148,6 +148,7 @@ compute stream:                                 +-> FIR band-pass -> covariance 
 src/bci/    stream.py ring_buffer.py filters.py classifier.py fbcsp.py gpu_pipeline.py closed_loop.py
             lsl_stream.py real_benchmark.py tail_diag.py server.py
 app/        dashboard.py         Streamlit UI (Hugging Face Spaces entry point)
+docs/       index.html, assets/  static project page (GitHub Pages, CNAME bci.filtree.in)
 tests/      ring buffer, correctness (CPU vs CUDA), latency and hot-path guards, LSL, real data,
             closed loop, filter-bank CSP, tail diagnostic, dashboard, server
 scripts/    run_benchmark.sh profile.py record_gif.py cursor_sim.py ui_contention.py
