@@ -162,7 +162,7 @@ ran. Where CUDA is absent: `make test REQUIRE_CUDA=0` (CI does this).
 
 ## 9. Environments (read before trusting any result)
 
-The code was written in a Linux container with **no NVIDIA GPU**, CPU-only torch 2.15.0; CPU-side
+CPU-side checks ran on a Linux host with **no NVIDIA GPU**, CPU-only torch 2.15.0; CPU-side
 checks (ring buffer, CPU-vs-torch correctness, ONNX on CPU, the pipeline's CPU path, dashboard
 rendering) ran there. Everything GPU-side was then run on the target machine: **RTX 4060 Laptop
 GPU, Windows, Python 3.13.5, torch 2.10.0+cu128 (CUDA 12.8), triton-windows 3.6.0,
@@ -191,7 +191,7 @@ measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default bui
 5. The synthetic generator's difficulty (`erd=0.45, source_amp=0.3, trial_jitter=0.4`) was
    tuned on seeds 7/21 so held-out accuracy is not ~100%; tests evaluate on other seeds.
 6. The README GIF is recorded on whatever device runs `scripts/record_gif.py`. The committed
-   one was recorded on a CPU-only container and says so on screen; re-record on the 4060.
+   one was recorded on a CPU-only environment and says so on screen; re-record on the 4060.
 7. Torch on Windows: the default PyPI wheel is CPU-only (as far as is known); install a CUDA
    build first (README says how). With a CPU-only torch the GPU tests fail under
    `make test` rather than silently skipping.
@@ -368,7 +368,7 @@ For the unexplained slow chunks of FINDINGS §7.1. Per chunk of the same paced r
 inside `stage`, `launch_pre` (enqueue only: never waits), `launch_post` and `collect`, Python garbage-collection pauses
 overlapping the chunk, and `nvidia-smi` telemetry at 1 Hz; `--no-gc`, `--priority high` and `--no-telemetry` are the
 A/B switches. The summary compares slow chunks (end-to-end > 2× median) with normal ones and prints hints, which are
-simple comparisons, not proofs. It needs the GPU laptop: in the container only its logic and a CPU run are tested.
+simple comparisons, not proofs. It needs the GPU laptop: on the CPU baseline only its logic and a CPU run are tested.
 
 ### 13.5 Deployment check
 

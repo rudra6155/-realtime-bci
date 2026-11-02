@@ -22,6 +22,7 @@ directly or through Lab Streaming Layer (LSL). It has never run on a real amplif
 |---|---|---|
 | End-to-end latency, 64 channels, synthetic, one chunk every 256 ms | p99 **23.4 ms** (target 50 ms) | RTX 4060 laptop, 1000 chunks |
 | Real EEG over LSL, Riemannian decoder | median 4.1–7.3 ms, p99 6.5–26.0 ms over six runs; LSL jitter 0.05–0.08 ms | same laptop, 22 channels |
+| Real EEG over LSL, filter-bank decoder | median 2.1 ms, p99 7.4 ms, max 11.2 ms in one run; LSL jitter 0.056 ms | same laptop, 22 channels |
 | 4-class Cohen's kappa, BCI Competition IV 2a, 9 subjects, train on session T, test on session E | **0.587** at a fixed window, **0.598** at the best time point | filter-bank CSP + LDA |
 
 The 2008 competition winner scored 0.57. The difference here is +0.017 with a paired standard error of 0.018 over
@@ -43,10 +44,9 @@ Three things to know before quoting any of this:
 * **The real-data p99 moves between runs.** In three of six runs about 1–2% of chunks ran several times slower,
   in the classifier and covariance stages. A diagnostic run excluded Python garbage collection and the host
   enqueue as causes; the cause itself is open ([FINDINGS §10](FINDINGS.md)).
-* **The filter-bank decoder has no GPU latency measurement yet.** Its accuracy is verified on the GPU
-  (`results/real_gpu_fbcsp_accuracy/` is byte-identical to the CPU run apart from line endings), but the latency
-  runs above were all made with the Riemannian decoder. Latency numbers come from one laptop with other
-  applications open.
+* **The filter-bank decoder's GPU latency rests on one run** (median 2.1 ms, p99 7.4 ms, `results/real_gpu_fbcsp_latency/`); its sample-to-action
+  has not been measured. Its accuracy is verified on the GPU (`results/real_gpu_fbcsp_accuracy/` is byte-identical to the CPU run apart from line
+  endings). All timings come from one laptop with other applications open.
 
 ## Real EEG
 
@@ -154,7 +154,7 @@ tests/      ring buffer, correctness (CPU vs CUDA), latency and hot-path guards,
 scripts/    run_benchmark.sh profile.py record_gif.py cursor_sim.py ui_contention.py
 results/    benchmark_*.csv, profiler_*, figures, dashboard GIFs and screenshots
             real/             accuracy, kappa time courses, noise logs, selection tables, latency runs
-            real_gpu_fbcsp_accuracy/   GPU run of the filter-bank decoder (raw files)
+            real_gpu_fbcsp_accuracy/, real_gpu_fbcsp_latency/   GPU runs of the filter-bank decoder (raw files)
             logs/, gpu_run/   console logs and extra benchmark runs from the GPU laptop
 ```
 
@@ -175,6 +175,6 @@ because MOABB is not in `requirements.txt`.
 ## Limitations
 
 The latency benchmark uses synthetic data. The real-data results replay one public dataset (9 subjects) with no
-artifact removal. One laptop and one software stack were measured. The filter-bank decoder's latency on the GPU and
-its sample-to-action are unmeasured. The cause of the slow-chunk tail is open. The cursor is a weak control signal.
+artifact removal. One laptop and one software stack were measured. The filter-bank decoder's GPU latency rests on a single
+run and its sample-to-action is unmeasured. The cause of the slow-chunk tail is open. The cursor is a weak control signal.
 `make` on Windows, a Linux GPU host and CUDA 13 are untested.

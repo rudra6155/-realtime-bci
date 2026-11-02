@@ -1,5 +1,6 @@
-# Dashboard image. Supports GPU acceleration via NVIDIA Container Toolkit (`docker run --gpus all`)
-# or standard CPU execution as fallback.
+# Dashboard image. Built and run on CPU in a sandbox (CLAIMS.md C1): the page serves and decodes. The `--gpus all` path
+# (NVIDIA Container Toolkit) and docker-compose.yml were not run. The default PyPI torch wheel is the CUDA build, which makes
+# the image about 10.8 GB; for a CPU-only deployment install torch from the CPU index.
 FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
