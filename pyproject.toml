@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "realtime-bci"
 version = "0.1.0"
-description = "Real-time, GPU-accelerated EEG decoding pipeline (synthetic data): ring buffer -> pinned memory -> CUDA streams -> Riemannian/LDA classifier -> live dashboard"
+description = "Real-time, GPU-accelerated EEG decoding pipeline: ring buffer -> pinned memory -> CUDA streams -> Riemannian or filter-bank CSP decoder -> live dashboard; tested on synthetic data and BCI Competition IV 2a"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

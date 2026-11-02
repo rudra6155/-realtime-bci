@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Record the live Streamlit dashboard to a GIF (headless Chromium + Pillow).
 
-    python scripts/record_gif.py [--out results/dashboard_demo.gif] [--seconds 24] [--fps 2]
+    python scripts/record_gif.py [--out results/dashboard_demo.gif] [--seconds 24] [--fps 2] [--real]
 
-The GIF shows whatever device the dashboard runs on (it is printed on the page). Re-record it
-on the RTX 4060 for the README; a GIF recorded on a CPU host says "Device: CPU".
+The GIF shows whatever device the dashboard runs on (it is printed on the page); a GIF recorded on a CPU host says
+"Device: CPU". ``--real`` switches the sidebar to the BCI Competition IV 2a replay first (needs MOABB and the dataset).
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=24.0)
     ap.add_argument("--fps", type=float, default=2.0)
     ap.add_argument("--width", type=int, default=900)
+    ap.add_argument("--real", action="store_true", help="record the real-EEG source instead of the synthetic one")
     args = ap.parse_args()
 
     from PIL import Image
@@ -68,7 +69,10 @@ def main() -> int:
             browser = _launch(p)
             page = browser.new_page(viewport={"width": 1400, "height": 1180})
             page.goto(url, timeout=60_000)
-            page.get_by_role("heading", name=re.compile(r"Left Hand|Right Hand")).first.wait_for(timeout=180_000)
+            page.get_by_text("Predicted class").first.wait_for(timeout=180_000)
+            if args.real:
+                page.locator('[data-testid="stSidebar"] label', has_text="BCI Competition").first.click()
+                page.get_by_text("Raw EEG, 22 channels").first.wait_for(timeout=300_000)
             page.wait_for_function("document.querySelectorAll('.js-plotly-plot').length >= 2", timeout=30_000)
             time.sleep(8)                                    # let the latency window and the plot fill
             t_end = time.time() + args.seconds

@@ -21,7 +21,7 @@ people. All data is synthetic.
 | Item | Decision |
 |---|---|
 | Input | Simulated 64-channel EEG at 250 Hz (`stream.py`) |
-| Chunk | **64 samples = 256 ms** (Nominal 250 ms window; 64 samples @ 250 Hz = 256 ms chosen for power-of-2 alignment) |
+| Chunk | **64 samples = 256 ms** (the original requirements say "250 ms, approx 64 samples"; 62.5 samples is not an integer, so 64 is used) |
 | Ring buffer | Pre-allocated `numpy` array, shape `(1000, 64)`, `float32` (1000 samples = 4 s) |
 | Decode window | Latest **500 samples (2 s)** read from the ring buffer on every chunk |
 | Classes | 2: `Left Hand`, `Right Hand` (simulated motor-imagery ERD, see §5) |
@@ -85,7 +85,7 @@ Tests are parametrized over `cpu` and `cuda`; `cuda` cases are skipped when CUDA
   The launch is split at `eigh` so the copy for the next chunk is enqueued before the host
   blocks there. The profiler trace shows this sync (device-to-host copies on the compute stream).
 * **`torch.compile`**: Inductor generates GPU code with Triton. If compile or Triton is
-  unavailable (for example, as far as I know, native Windows has no official Triton), the
+  unavailable (for example, as far as is known, native Windows has no official Triton), the
   filter **falls back to eager** with a logged warning, and the result files record
   `compiled=False`. Neither the compiled nor the eager GPU path can be exercised in the
   authoring environment (no GPU).
@@ -160,20 +160,23 @@ Every claim in `CLAIMS.md` has one of:
 default (`REQUIRE_CUDA ?= 1`) so a green `make test` on your machine means the GPU tests
 ran. Where CUDA is absent: `make test REQUIRE_CUDA=0` (CI does this).
 
-## 9. Hardware Environments & Validation Setup
+## 9. Environments (read before trusting any result)
 
-Dual validation architecture:
-* **CPU Development & CI**: Linux, 4 vCPU, PyTorch CPU baseline (verifies ring buffer, CPU-vs-torch correctness, ONNX export, and dashboard UI).
-* **Target GPU Platform**: NVIDIA RTX 4060 Laptop GPU (8 GB), Windows 11, Python 3.13.5, PyTorch 2.10.0+cu128 (CUDA 12.8), triton-windows 3.6.0, onnxruntime-gpu 1.26.0.
-Empirical benchmark results and stage traces are documented in FINDINGS.md and CLAIMS.md.
+The code was written in a Linux container with **no NVIDIA GPU**, CPU-only torch 2.15.0; CPU-side
+checks (ring buffer, CPU-vs-torch correctness, ONNX on CPU, the pipeline's CPU path, dashboard
+rendering) ran there. Everything GPU-side was then run on the target machine: **RTX 4060 Laptop
+GPU, Windows, Python 3.13.5, torch 2.10.0+cu128 (CUDA 12.8), triton-windows 3.6.0,
+onnxruntime-gpu 1.26.0**. Results, evidence and what is still unverified are in CLAIMS.md; the
+GPU numbers are in FINDINGS.md. The README quotes the `paced` (real-time rate) run as the latency
+headline; the `overlap` run is what the pytest assertion and `benchmark_latency.csv` use.
 
 Changes forced by the first GPU runs: the launch was split at `eigh` (the first look-ahead ordering
 measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default build targets CUDA 13).
 
-## 10. Implementation Decisions & Design Notes
+## 10. Interpretations of the original requirements
 
 1. `results/benchmark_latency.csv` holds the per-chunk raw samples of the headline run;
-   percentiles go to `results/benchmark_summary.csv` (summarized in benchmark_summary.csv).
+   percentiles go to `results/benchmark_summary.csv` (the requirements say "p50/p99 CSV").
 2. `make install` runs `pip install -e ".[dev]"` so `make test` has pytest/playwright.
 3. Extra files beyond the listed structure: `tests/test_dashboard.py` (test-matrix row 4),
    `tests/test_server.py`, `tests/test_profile_analysis.py`, `tests/conftest.py`,
@@ -182,17 +185,21 @@ measured 0 µs of overlap); `onnxruntime-gpu` is pinned `<1.27` (its default bui
    `results/profiler_trace.json`, `results/profiler_overlap.png`,
    `results/profiler_overlap.csv`, `results/benchmark_summary.csv`,
    `results/benchmark_latency_baseline.csv` (and `_paced.csv`).
-4. Latency verification: `test_latency.py` enforces the <50 ms p99 SLA, while `make benchmark` orchestrates the multi-run benchmark suite to ensure consistent data across CSVs and plots.
+4. The required latency *test* "writes results/benchmark_latency.csv". Here `test_latency.py`
+   asserts p99 and `make benchmark` is the single writer of `results/`, so the CSV, summary
+   and histogram always come from the same run.
 5. The synthetic generator's difficulty (`erd=0.45, source_amp=0.3, trial_jitter=0.4`) was
    tuned on seeds 7/21 so held-out accuracy is not ~100%; tests evaluate on other seeds.
-6. The README GIF is recorded on whatever device runs `scripts/record_gif.py`. The demo GIF shows the live dashboard in action with rolling latency gauges.
-7. Torch on Windows: the default PyPI wheel is CPU-only (as far as I know); install a CUDA
+6. The README GIF is recorded on whatever device runs `scripts/record_gif.py`. The committed
+   one was recorded on a CPU-only container and says so on screen; re-record on the 4060.
+7. Torch on Windows: the default PyPI wheel is CPU-only (as far as is known); install a CUDA
    build first (README says how). With a CPU-only torch the GPU tests fail under
    `make test` rather than silently skipping.
 
 ## 11. Phase 2: real EEG (BCI Competition IV 2a) and LSL
 
-Phase 2 focuses on Lab Streaming Layer (LSL) inter-process transport and real-data validation against BCI Competition IV 2a; closed-loop dashboard and decoder tuning are covered in §12.
+Scope of this phase: **LSL integration and the real-data benchmark only**; the
+closed-loop dashboard and the decoder selection that followed are §12. No ICA.
 
 **Dataset.** BCI Competition IV dataset 2a via MOABB 1.7.2 (`BNCI2014_001`, `artifact_handling="annotate"`):
 9 subjects, 2 sessions each (`0train` = T, `1test` = E, different days), 6 runs of 48 trials (12 per
@@ -225,8 +232,10 @@ empirically: decoding is at chance for windows before the annotation and peaks f
 * Kappa = unweighted Cohen's kappa (`sklearn.metrics.cohen_kappa_score`).
 
 **Comparison target.** Kai Keng Ang et al. won dataset 2a with filter-bank CSP: mean kappa **0.57**
-(per subject 0.68, 0.42, 0.75, 0.48, 0.40, 0.27, 0.77, 0.75, 0.61; bbci.de results page). Historical note: BCI Competition IV ran in 2008 (Ang et al. 2012 published the journal retrospective). Differences that make the comparison
-approximate: the competition scored a causal sample-by-sample output, we score 256 ms chunk decisions;
+(per subject 0.68, 0.42, 0.75, 0.48, 0.40, 0.27, 0.77, 0.75, 0.61; bbci.de results page). Date check:
+BCI Competition IV ran in **2008** (results announced 12 Dec 2008); 2012 is the year of the
+review article and of the journal version of the winning method. Differences that make the comparison
+approximate: the competition scored a causal sample-by-sample output, this project scores 256 ms chunk decisions;
 their classifier saw the whole recording history causally, ours a 2 s window.
 
 **Noise log.** For each trial, over the decision window: EEG peak-to-peak (95th percentile over channels,
@@ -252,7 +261,7 @@ not import them.
 ## 12. Phase 3: closed-loop dashboard and decoder selection
 
 Requested after phase 2: (1) the closed-loop dashboard, (2) close the kappa gap using only changes selected
-on **session T**. Checking the Docker / Hugging Face deployment was deferred by the requester.
+on **session T**. Checking the Docker / Hugging Face deployment was deferred.
 
 ### 12.1 Closed loop
 
@@ -359,7 +368,7 @@ For the unexplained slow chunks of FINDINGS §7.1. Per chunk of the same paced r
 inside `stage`, `launch_pre` (enqueue only: never waits), `launch_post` and `collect`, Python garbage-collection pauses
 overlapping the chunk, and `nvidia-smi` telemetry at 1 Hz; `--no-gc`, `--priority high` and `--no-telemetry` are the
 A/B switches. The summary compares slow chunks (end-to-end > 2× median) with normal ones and prints hints, which are
-empirical diagnostics to isolate GPU kernel execution from host scheduling overhead.
+simple comparisons, not proofs. It needs the GPU laptop: in the container only its logic and a CPU run are tested.
 
 ### 13.5 Deployment check
 

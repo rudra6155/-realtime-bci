@@ -7,13 +7,14 @@ repo on the target machine:
 * **GPU machine**: NVIDIA GeForce RTX 4060 Laptop GPU (8 GB), Windows, Python 3.13.5, driver
   reporting CUDA 13.4 (`nvidia-smi`), **torch 2.10.0+cu128 (CUDA 12.8), triton-windows 3.6.0,
   onnxruntime-gpu 1.26.0**. The filter ran through `torch.compile` unless a row says eager.
-* **CPU Baseline / CI environment**: 4 vCPU, torch 2.15.0+cpu, Python 3.13 (for CPU reference paths).
+* **CPU-only container** used to author the code: 4 vCPU, torch 2.15.0+cpu, Python 3.13 — only
+  sections explicitly labelled CPU.
 
 Per-chunk raw latencies: `results/benchmark_latency.csv` (run `overlap`),
 `benchmark_latency_baseline.csv`, `benchmark_latency_paced.csv`. Percentiles:
 `results/benchmark_summary.csv` (recomputed independently from the raw files: identical to
 < 1e-6 ms). 1000 measured chunks per run after 50 discarded warm-up chunks. Console logs are in
-the repo root and `gpu_run/` (PowerShell writes them as UTF-16).
+`results/logs/` and `results/gpu_run/` (PowerShell writes them as UTF-16).
 
 ## 1. System architecture
 
@@ -44,7 +45,7 @@ directions.
 50 ms target. The back-to-back runs are 11.22 ms (`overlap`) and 5.19 ms (`baseline`).**
 Source: `results/benchmark_summary.csv`. All three runs pass; the test
 `test_p99_latency_under_50ms` (back-to-back `overlap` run) passes on the machine
-(`gpu_pytest_full2.txt`: 54 passed, 1 skipped).
+(`results/logs/gpu_pytest_full2.txt`: 54 passed, 1 skipped).
 
 End-to-end latency, chunk received → label ready (ms):
 
@@ -72,7 +73,7 @@ How to read it:
 * The **classifier stage dominates**: ~2.8–3.0 ms back-to-back (about 75% of the stage total),
   ~16 ms in the paced run.
 * The `cov` stage now includes the two whitening matmuls, because the launch was split at
-  `eigh` (§3). It is not comparable to the pre-split log `gpu_benchmark.txt`.
+  `eigh` (§3). It is not comparable to the pre-split log `results/logs/gpu_benchmark.txt`.
 * The **paced run is the realistic one**. Its classifier stage is ~5.5× the back-to-back one (16.19 vs 2.95 ms p50)
   even though the profiled kernels take only ~1.8 ms of GPU time per chunk (§3.3), so most of the
   paced classifier time is not GPU execution. The cause is **not isolated**; candidates (not
@@ -81,7 +82,7 @@ How to read it:
 
 ### 2.1 Eager vs `torch.compile` filter
 
-`gpu_run/nocompile_after/benchmark_summary.csv` (same stack, `--no-compile`) against the table
+`results/gpu_run/nocompile_after/benchmark_summary.csv` (same stack, `--no-compile`) against the table
 above:
 
 | | `overlap` e2e p50 / p99 | `overlap` filter p50 | `baseline` e2e p50 / p99 | wall/chunk (overlap, baseline) |
@@ -97,8 +98,8 @@ for a 0.3 ms stage.
 ### 2.2 Variance worth knowing about
 
 * The latency test inside the `pytest` process printed p50 13.79 / p99 17.05 ms once on this exact
-  stack (`gpu_pytest2.txt`, `-s` output), against 7.7 / 10.0 ms from the CLI benchmark on the same
-  stack (`gpu_benchmark.txt`, same pre-split code). About 1.8×; the cause is **not isolated** (the pytest process also loads onnxruntime's CUDA
+  stack (`results/logs/gpu_pytest2.txt`, `-s` output), against 7.7 / 10.0 ms from the CLI benchmark on the same
+  stack (`results/logs/gpu_benchmark.txt`, same pre-split code). About 1.8×; the cause is **not isolated** (the pytest process also loads onnxruntime's CUDA
   provider; background GPU apps were running). The assertion has ample margin either way, but quote
   CLI-benchmark numbers, not pytest printouts.
 * Back-to-back numbers flatter the pipeline: the paced p99 (23.4 ms) is about 2× the `overlap` p99 (11.2 ms) and 4.5× the `baseline` p99 (5.2 ms).
@@ -128,11 +129,11 @@ Reasons, from the data:
 ### 3.2 Before and after the first fix: 0 µs → 7.3 µs of overlap
 
 * First version (`stage(N)` issued before `launch(N-1)`): `h2d_overlapped_with_kernels_us =
-  0.0` (`gpu_profile.txt`). The GPU was idle when the copy was issued, because the previous chunk
+  0.0` (`results/logs/gpu_profile.txt`). The GPU was idle when the copy was issued, because the previous chunk
   had already been fully collected.
 * Second version (launch split at `eigh`: `launch_pre(N-1)` → `stage(N)` → `launch_post(N-1)`):
   **7.33 µs of 458 µs H2D time (1.6%) ran concurrently with kernels** (`profiler_overlap.csv`;
-  `gpu_profile2.txt`). Exactly one of the 40 copies overlapped anything: its 11.9 µs span
+  `results/logs/gpu_profile2.txt`). Exactly one of the 40 copies overlapped anything: its 11.9 µs span
   overlapped the whitening GEMM kernels (4.74 µs a `cutlass` double-precision GEMM + 2.59 µs a
   `cublasLt` split-K reduction). D2H copies overlapped nothing. The zoom panel of
   `results/profiler_overlap.png` shows this.
@@ -151,7 +152,7 @@ Per chunk (40 chunks, `profiler_trace.json`):
 * Extra copies on the **compute stream** every chunk: one device-to-host into pageable memory
   (~1.2 µs), one into pinned memory (~1.9 µs) and three device-to-device (~1.1 µs each). They are
   issued from the classifier stage and are consistent with the documented host sync inside
-  `torch.linalg.eigh`; I did not trace them to a specific line. My own D2H of the 16-byte score
+  `torch.linalg.eigh`; They were not traced to a specific line. The pipeline's own D2H of the 16-byte score
   vector (on the copy stream) takes ~1.1 µs.
 * The GPU is busy roughly 1.8 ms of a ~4 ms chunk (profiled run is slower than the benchmark
   because of profiler overhead): the rest is host launch/sync time.
@@ -166,7 +167,7 @@ sync, `torch.cuda.CUDAGraph` for the non-`eigh` kernels. The 50 ms target is met
 
 ### 4.1 Running the pipeline in the Streamlit process distorts the latency it displays (CPU)
 
-Measured on the CPU environment with `scripts/ui_contention.py --device cpu`, paced 1× pipeline
+Measured on the CPU container with `scripts/ui_contention.py --device cpu`, paced 1× pipeline
 thread, ~58 chunks per condition (p99 ≈ max at this n). A = pipeline alone; B = plus a thread that
 builds and serializes a 64-trace Plotly figure every 0.5 s in the same process. Four repetitions:
 
@@ -205,7 +206,7 @@ disables both. On the 4060 the CUDA-vs-CPU differences are ≤ 1.2e-5 (§4.5).
   The `torch.export`-based exporter was not evaluated (it needs `onnxscript`).
 * The LDA head exports and runs in onnxruntime. With `onnxruntime-gpu 1.26.0` the session reports
   `['CUDAExecutionProvider', 'CPUExecutionProvider']` and matches PyTorch to 2.8e-14
-  (`gpu_pytest2.txt`). I did not verify that the float64 Gemm node itself is placed on the CUDA
+  (`results/logs/gpu_pytest2.txt`). It was not verified that the float64 Gemm node itself is placed on the CUDA
   provider rather than falling back to CPU.
 * Environment lesson: `onnxruntime-gpu` ≥ 1.27 is built for **CUDA 13** by default; with a CUDA 12.x
   torch the first GPU run failed to load the provider (`cublasLt64_13.dll` missing; the head still
@@ -214,19 +215,19 @@ disables both. On the 4060 the CUDA-vs-CPU differences are ≤ 1.2e-5 (§4.5).
 
 ### 4.5 Correctness margins, CUDA vs scipy float64 (RTX 4060)
 
-Max |difference| over 10 windows, `atol = 1e-4` required (`gpu_pytest2.txt`): band-pass 1.17e-5
+Max |difference| over 10 windows, `atol = 1e-4` required (`results/logs/gpu_pytest2.txt`): band-pass 1.17e-5
 (values up to 30), covariance 1.32e-7, tangent features 1.41e-7, LDA scores 7.24e-7, whole streaming
 path over 23 chunks 1.06e-6 (with and without look-ahead), `torch.compile`'d band-pass 1.03e-5.
-The CPU-vs-scipy numbers from the CPU baseline environment are essentially identical (the band-pass figure matches
+The CPU-vs-scipy numbers from the container are essentially identical (the band-pass figure matches
 to four digits), which says float32 rounding of the filter output dominates that error.
 
 ### 4.6 `torch.compile` and Triton on Windows
 
 First GPU run (torch 2.14.1+cu126): `TritonMissing`, filter fell back to eager and said so
 (`filter: eager (compile failed: TritonMissing)`). After installing `triton-windows 3.6.0`
-(the version the triton-windows docs pair with torch 2.10; I found no mapping for newer torch) the
+(the version the triton-windows docs pair with torch 2.10; no mapping for newer torch was found) the
 compiled filter works and matches scipy to 1.03e-5. The CPU-side compile test is skipped on the
-Windows machine because no C++ compiler is on `PATH` (it passes in the Linux environment).
+Windows machine because no C++ compiler is on `PATH` (it passes in the Linux container).
 
 ### 4.7 Synthetic data
 
@@ -237,7 +238,7 @@ generator, not EEG decoding.
 
 ### 4.8 Back-to-back vs paced
 
-GPU: `baseline` e2e p50 3.86 ms vs `paced` 18.61 ms on identical code paths (§2). CPU environment, same
+GPU: `baseline` e2e p50 3.86 ms vs `paced` 18.61 ms on identical code paths (§2). CPU container, same
 effect in smaller form (paced ~2× p50). Quote the paced number as the real-time latency.
 
 ## 5. Limitations
@@ -257,7 +258,7 @@ effect in smaller form (paced ~2× p50). Quote the paced number as the real-time
 ## 6. Phase 2: real EEG, BCI Competition IV dataset 2a
 
 Scope of this phase: real-data stream, LSL with a jitter test, and the real-data benchmark (the closed-loop
-dashboard came afterwards). Everything was run twice: in the **CPU baseline environment** (Linux, torch 2.15.0+cpu,
+dashboard came afterwards). Everything was run twice: in the **CPU-only container** (Linux, torch 2.15.0+cpu,
 MOABB 1.7.2, MNE 1.13.2, pylsl with liblsl library version 118) and on the **RTX 4060 laptop** (Windows,
 torch 2.10.0+cu128, same MOABB/pylsl; liblsl 1.18.0). Each number below says which.
 
@@ -297,13 +298,13 @@ the same 4-class scores: accuracy 0.752, kappa 0.506. Chance is accuracy 0.25 an
 
 ### 6.2 Comparison with the BCI Competition IV winner (kappa 0.57)
 
-* **We do not beat it** (baseline decoder; the one selected afterwards is §8 and is still below). Mean kappa 0.456 at the fixed window and 0.510 at the best time point, against
+* **The baseline decoder does not beat it** (baseline decoder; the one selected afterwards is §8 and is still below). Mean kappa 0.456 at the fixed window and 0.510 at the best time point, against
   0.57 (Kai Keng Ang et al., filter-bank CSP + Naive Bayes Parzen window). That is 0.11 / 0.06 below. The
   best-time-point figure is close to the competition's second place (0.52; third was 0.31).
-* Per subject we match or exceed the winner on S1 and S6 (both metrics) and S9 (best time point only); we are
+* Per subject the decoder matches or exceeds the winner on S1 and S6 (both metrics) and S9 (best time point only); it is
   well below it on S2, S3, S5, S7, S8. Across subjects the two sets of kappas correlate at r = 0.88: the
   same subjects are easy and hard for both methods.
-* **Dataset timeline:** BCI Competition IV was held in **2008** (launched 3 Jul, submissions closed
+* **Date check:** BCI Competition IV was held in **2008** (launched 3 Jul, submissions closed
   21 Nov, results 12 Dec 2008). 2012 is the year of the review article (Tangermann et al., Front. Neurosci.)
   and of the journal version of the winning method. The 0.57 is right (bbci.de results page).
 * **The comparison is approximate.** The competition scored a causal, sample-by-sample class output and took
@@ -336,11 +337,11 @@ experts' flag and whether the fixed-window prediction was right.
 ### 6.4 What was run where
 
 * Accuracy / kappa / noise log: run on both machines with `python -m bci.real_benchmark accuracy|all`
-  (CPU baseline: CPU device; RTX 4060 laptop: CUDA device, filter not compiled). For the baseline decoder the three
+  (container: CPU device; RTX 4060 laptop: CUDA device, filter not compiled). For the baseline decoder the three
   CSVs (`accuracy_per_subject.csv`, `kappa_timecourse.csv`, `noise_log.csv`, now in `results/real/baseline_k1/`) came out **identical**: git recorded
   no change when the GPU-run files were pushed over the CPU-run ones, and the nine per-subject console lines
   match to the printed precision. The GPU machine took 33–79 s per subject (it includes a ~80 MB MOABB
-  download per subject), the CPU baseline environment ~25 s.
+  download per subject), the container ~25 s.
 * Real-data label latency and LSL jitter: GPU machine, five runs with the Riemannian decoder, §7.1.
 
 ## 7. Phase 2: LSL transport and jitter
@@ -350,19 +351,19 @@ through a `pylsl` outlet; an inlet pulls them into the ring buffer. **Jitter = s
 (`t_ring` − producer timestamp)**, with `t_ring` = `local_clock()` right after `RingBuffer.write`, clock offset
 corrected by `time_correction()`, inlet post-processing off. The test `tests/test_lsl.py` asserts **< 1 ms**.
 
-CPU host, loopback, 64-channel synthetic chunks, producer process separate, first 5 chunks excluded:
+Container, loopback, 64-channel synthetic chunks, producer process separate, first 5 chunks excluded:
 
 | measurement | chunks | jitter (std) | mean delay | p50 | p99 | p99−p50 | max | producer schedule std |
 |---|---|---|---|---|---|---|---|---|
-| CPU host: `tests/test_lsl.py` (idle CPU) | 50 | **0.240 ms** | 0.976 | 0.885 | 1.611 | 0.726 | 1.704 | 0.062 ms |
-| CPU host: `python -m bci.lsl_stream jitter --seconds 15` | 54 | 0.177 ms | 0.927 | 0.892 | 1.658 | 0.766 | 1.808 | 0.232 ms |
-| CPU baseline: real recordings (S1 E) with the pipeline running (`real_benchmark latency`, CPU smoke) | 150 | 0.472 ms | 0.832 | 0.768 | 1.581 | 0.813 | 6.279 | 1.335 ms |
+| container: `tests/test_lsl.py` (idle CPU) | 50 | **0.240 ms** | 0.976 | 0.885 | 1.611 | 0.726 | 1.704 | 0.062 ms |
+| container: `python -m bci.lsl_stream jitter --seconds 15` | 54 | 0.177 ms | 0.927 | 0.892 | 1.658 | 0.766 | 1.808 | 0.232 ms |
+| container: real recordings (S1 E) with the pipeline running (`real_benchmark latency`, CPU smoke) | 150 | 0.472 ms | 0.832 | 0.768 | 1.581 | 0.813 | 6.279 | 1.335 ms |
 | **RTX 4060 laptop, Windows**: `tests/test_lsl.py` | 50 | **0.097 ms** | 0.601 | 0.592 | 0.791 | 0.199 | 0.801 | 0.014 ms |
 | **RTX 4060 laptop, Windows**: real recordings (S1 E) with the GPU pipeline running, five runs (`results/real/latency_run0..4/real_latency_summary.csv`; range over runs) | 1000 each | **0.051–0.067 ms** | 0.436–0.477 | 0.429–0.470 | 0.614–0.666 | 0.151–0.233 | 0.863–1.469 | 0.010–0.021 ms |
 
 * Jitter stays below the 1 ms bar in every measurement, but the third shows what contention does: with the pipeline
   busy on the same 4-vCPU machine the maximum delay hit 6.3 ms, the producer's own schedule jitter rose to
-  1.3 ms and its worst single deviation from the 256 ms schedule was 11.3 ms. The Windows laptop, with more CPU headroom than the 4-vCPU environment, was tighter: 0.05–0.10 ms (std) in the test and all five 1000-chunk runs, with 0 ring-buffer drops (maximum delay 0.86–1.47 ms).
+  1.3 ms and its worst single deviation from the 256 ms schedule was 11.3 ms. The Windows laptop, with more CPU headroom than the 4-vCPU container, was tighter: 0.05–0.10 ms (std) in the test and all five 1000-chunk runs, with 0 ring-buffer drops (maximum delay 0.86–1.47 ms).
 * Float32 data crosses LSL **bit-identical** (test), and the pipeline gives the same scores whether chunks come
   straight from the generator or through LSL (`atol = 1e-9`).
 * **Loopback on one machine only**: this says nothing about network (Wi-Fi/Ethernet) jitter or about a real
@@ -424,7 +425,7 @@ back to back (about 6 min apart by the console clock, which is not stored in the
 
 The decoder was changed only through a selection that never touches session E (protocol: SPEC.md §12.2;
 `python -m bci.real_benchmark select`, output `results/real/riemann_k4/model_selection_T.csv` and `.log`, 24 candidates, about
-4 minutes on the 4-vCPU environment with `--workers 4`). Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin:
+4 minutes on the 4-vCPU container with `--workers 4`). Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin:
 
 | bands / window (samples) | k=1 | k=2 | k=3 | k=4 | k=6 | k=8 |
 |---|---|---|---|---|---|---|
@@ -440,7 +441,7 @@ before plus smoothing). So the session-T evidence for the filter bank and for th
 are not distinguishable from the simpler decoder, not that they are worse. The causal mean over k=4
 chunks adds a group delay of (k−1)/2 = 1.5 chunks = 0.38 s: the label trails the intent longer than before.
 
-### 8.2 Session E, scored once (CPU baseline)
+### 8.2 Session E, scored once (container, CPU device)
 
 `python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --smooth-k 4 --decoder riemann` → `results/real/riemann_k4/accuracy_per_subject.csv`,
 `kappa_timecourse.csv`, `noise_log.csv`, `kappa_vs_competition.png`, console log `accuracy_k4.log` (these ran before `--decoder` existed; the
@@ -480,7 +481,7 @@ All trials: accuracy 0.629, kappa 0.506 (fixed) / 0.517 (best). Left-vs-right ka
 * Same caveats as §6.2 about what the 0.57 measures (sample-by-sample causal output, best time point chosen on E).
 * **Reproduced on the GPU** (`python -m bci.real_benchmark all` on the RTX 4060 laptop): the nine per-subject console
   lines and the mean lines (accuracy 0.629, kappa 0.505 / 0.523, left-vs-right 0.770 / 0.542) are identical to the
-  CPU environment's, and git reports no change in `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv`
+  container's, and git reports no change in `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv`
   after that run. The PNG was re-rendered with different bytes (not committed).
 
 ### 8.3 Closed-loop dashboard
@@ -491,11 +492,11 @@ agreement with the replayed intent, sample-to-action latency (last, p50, p99) an
 latency, next to the p99 gauge and the raw EEG; a sidebar switches between the synthetic stream and the real
 recordings (subject 1–9, session E replayed in a loop).
 
-Checked in the CPU baseline environment (CPU device, headless Chromium, `results/closed_loop_synthetic_cpu.png`,
+Checked in the container (CPU device, headless Chromium, `results/closed_loop_synthetic_cpu.png`,
 `results/closed_loop_real_cpu.png`): both sources render with no Streamlit exception; `tests/test_dashboard.py` asserts
 the cursor takes at least two positions within 12 s and that sample-to-action is displayed and positive;
 `tests/test_server.py` runs the process engine on both sources (the real source needs `BCI_RUN_REAL=1`). Full suite:
-74 passed, 9 skipped (CUDA-only) in the CPU baseline environment; **82 passed, 1 skipped in 150 s on the RTX 4060 laptop** with
+74 passed, 9 skipped (CUDA-only) in the container; **82 passed, 1 skipped in 150 s on the RTX 4060 laptop** with
 `BCI_RUN_REAL=1` and `BCI_REQUIRE_CUDA=1` (the skip is the CPU `torch.compile` test: no C++ compiler on Windows).
 
 Read off the two screenshots (one readout each, CPU, **not a benchmark**): sample-to-action p50 / p99 =
@@ -524,13 +525,13 @@ Two things visible in those screenshots that should not be read as results:
 
 ## 9. Phase 4: round-2 decoder selection, cursor leak, tail diagnostic, deployment check
 
-Requested after phase 3: close the four remaining gaps. What could be done in the CPU baseline environment was done; what needs the
-GPU laptop or the user's accounts is listed in §9.7.
+Requested after phase 3: close the four remaining gaps. What could be done in the container was done; what needs the
+GPU laptop or on external accounts is listed in §9.7.
 
 ### 9.1 Round 2 of the selection, session T only
 
 Candidates and rule were written into SPEC.md §13.1 before they were computed (`python -m bci.real_benchmark select2`,
-output `results/real/model_selection2_T.csv` and `.log`, 36 candidates, 9 subjects, about 7 min on the 4-vCPU environment).
+output `results/real/model_selection2_T.csv` and `.log`, 36 candidates, 9 subjects, about 7 min on the 4-vCPU container).
 Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin, artifact-free trials:
 
 | family, parameter | k=1 | k=2 | k=3 | k=4 | k=6 | k=8 |
@@ -557,7 +558,7 @@ Mean kappa over the 9 subjects, leave-one-run-out on session T, at the fixed bin
 
 ### 9.2 Session E, scored once
 
-`python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --decoder fbcsp --smooth-k 4` (CPU baseline)
+`python -m bci.real_benchmark accuracy --subjects 1-9 --device cpu --decoder fbcsp --smooth-k 4` (container, CPU device)
 → `results/real/accuracy_per_subject.csv`, `kappa_timecourse.csv`, `noise_log.csv`, `kappa_vs_competition.png`, console
 log `accuracy_fbcsp_k4.log`. Artifact-free trials; the Riemannian columns are `results/real/riemann_k4/` and `baseline_k1/`.
 
@@ -587,7 +588,7 @@ All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right ka
   bin was set a priori in phase 2 and not changed).
 * Flagged trials still decode worse: accuracy 0.603 (224 flagged) vs 0.697 clean.
 * **Reproduced on the GPU, with raw files.** The 9-subject run on the RTX 4060 laptop (`--device cuda --decoder fbcsp`, run on the phase-4 code) is in
-  `results/real_gpu_fbcsp_accuracy/`: `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv` are **byte-identical to the CPU baseline's files apart from line endings**
+  `results/real_gpu_fbcsp_accuracy/`: `accuracy_per_subject.csv`, `kappa_timecourse.csv` and `noise_log.csv` are **byte-identical to the container's files apart from line endings**
   (all nine subjects, all 144 time-course rows, and all 2592 trial-level results, with no flipped decision). The console text of that run is kept next to them in `console_output.txt`.
 * **No artifact removal of any kind.** No ICA, no regression, no rejection; the EOG channels are not used for decoding (they feed only the noise log). The scores are on the experts'
   artifact-free trials, the competition's evaluation set; with the flagged trials included kappa is 0.585 (fixed) / 0.594 (best).
@@ -600,9 +601,9 @@ All trials: accuracy 0.689, kappa 0.585 (fixed) / 0.594 (best). Left-vs-right ka
 * The comparison with 0.57 stays approximate (FINDINGS §6.2): the competition scored a causal sample-by-sample output;
   here a decision per 256 ms chunk from a 2 s window plus a 4-chunk mean, and both numbers use a best time point chosen on E.
 * One dataset, 9 subjects, replayed recordings, no artifact removal, no person or amplifier.
-* The 0.587 / 0.598 were computed in the CPU baseline's CPU and **reproduced on the GPU with raw files** (§9.2). The streaming code is checked against a CPU reference by a test
-  that also runs on CUDA and passed there (CLAIMS P42). **The filter-bank decoder's latency on the GPU has not been measured**: the run I first attributed to it (`results/real_gpu_fbcsp/`)
-  was the Riemannian decoder (§10.2). On the CPU baseline's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms (filter-bank) against 2.18 / 16.74 ms (Riemannian), one run each.
+* The 0.587 / 0.598 were computed in the container's CPU and **reproduced on the GPU with raw files** (§9.2). The streaming code is checked against a CPU reference by a test
+  that also runs on CUDA and passed there (CLAIMS P42). **The filter-bank decoder's latency on the GPU has not been measured**: the run first attributed to it (`results/real_gpu_fbcsp/`)
+  was the Riemannian decoder (§10.2). On the container's CPU a 200-chunk smoke gave e2e p50 / p99 of 2.16 / 3.75 ms (filter-bank) against 2.18 / 16.74 ms (Riemannian), one run each.
 * The filter-bank decoder has no eigendecomposition and no host synchronisation. Whether that removes the slow-chunk tail
   of §7.1 (which sat in the float64 covariance and classifier stages) is untested.
 
@@ -623,7 +624,7 @@ was fixed before measuring). `scripts/cursor_sim.py` replays each decoder's sess
 
 ### 9.5 Tail-latency diagnostic
 
-`python -m bci.tail_diag` (SPEC.md §13.4) was built for the GPU laptop. Tested in the CPU baseline environment: the analysis logic, the GC log, the telemetry
+`python -m bci.tail_diag` (SPEC.md §13.4) was built for the GPU laptop. Tested in the container: the analysis logic, the GC log, the telemetry
 no-op without `nvidia-smi`, and a CPU run on a stand-in recording and on real data. It has since been run on the RTX 4060 twice (§10.1, runs 6 and 7); the second
 run reproduced the tail and excluded GC and the host enqueue, but **the cause stays open** (CLAIMS P24, P43; next runs: §10.4). The original run list, each about 5 minutes:
 
@@ -649,7 +650,7 @@ a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` poin
   phase-3 code; the final code was checked in the same image with `src` and `app` mounted over the installed copies.
 * **Hugging Face path.** `requirements.txt` alone was installed into a clean Python 3.13.17 virtual environment (torch 2.15.0+cpu, numpy, scipy,
   scikit-learn, streamlit, plotly: no fastapi, onnx or MOABB) and `streamlit run app/dashboard.py` served the final dashboard with no exception.
-* **Not done:** a real Space (needs the user's Hugging Face account), `docker run --gpus all`, `docker-compose.yml`, and the GitHub Actions workflow
+* **Not done:** a real Space (needs a Hugging Face account), `docker run --gpus all`, `docker-compose.yml`, and the GitHub Actions workflow
   (never executed). The real-data source is absent from both CPU deployments because MOABB is not in their dependencies; the page says so.
 
 ### 9.7 Open after phase 4
@@ -658,7 +659,7 @@ a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` poin
    sample-to-action in the dashboard engine. Done: its 9-subject accuracy with raw files (§9.2) and the phase-4 test suite, including the CUDA equivalence test (CLAIMS P42).
 2. The tail diagnostic runs of §9.5 (cause of the slow chunks).
 3. A real Hugging Face Space and `docker run --gpus all`.
-4. Future validation: physical EEG amplifier hardware integration and live participants.
+4. Beyond this project's reach from the container: any real amplifier or participant.
 
 ## 10. Intermittent Tail Latency on Windows
 
@@ -672,8 +673,8 @@ a normal one with slow GPU stages points at the GPU; a drop in `gpu_sm_mhz` poin
 | 3 | `real_benchmark` over LSL (`latency_run3`) | none | 7.204 | 25.970 | 49.953 | 19 (> 20 ms) |
 | 4 | `real_benchmark` over LSL (`latency_run4`) | none | 7.261 | 10.227 | 11.518 | 0 (> 20 ms) |
 | 5 | `real_benchmark` over LSL (`results/real_gpu_fbcsp/`) | none | 4.078 | 6.477 | 13.962 | 0 (> 20 ms) |
-| 6 | `bci.tail_diag`, in-process stream (command had no `--decoder`: tool default) | nvidia-smi polling **on** | 3.450 | not in output log | not in output log | 0 (> 6.90 ms = 2 × median) |
-| 7 | `bci.tail_diag --decoder riemann --no-telemetry` | none | 7.959 | not in output log | not in output log | **35** (> 15.92 ms = 2 × median) |
+| 6 | `bci.tail_diag`, in-process stream (command had no `--decoder`: tool default) | nvidia-smi polling **on** | 3.450 | not in the paste | not in the paste | 0 (> 6.90 ms = 2 × median) |
+| 7 | `bci.tail_diag --decoder riemann --no-telemetry` | none | 7.959 | not in the paste | not in the paste | **35** (> 15.92 ms = 2 × median) |
 
 How the decoder is known for each run: runs 0–4 were made when the Riemannian decoder was the only one. Run 5 was made on the **phase-3 checkout**: the terminal log shows the `git pull` that
 would have brought the filter-bank code aborted ("local changes would be overwritten"), the pytest run right after collected 83 tests (the phase-4 suite has 109), the `all` command's accuracy
@@ -684,9 +685,9 @@ Run 5 recomputed from its raw rows (identical to its summary): p50 / p99 / max 4
 0.585, cov 0.961, classifier 1.656 ms against about 0.11 / 0.8 / 5.0 ms in runs 0–4 for the same decoder: **unexplained**, and the
 reason the stage profile cannot be used to tell decoders apart. The producer's schedule was also less steady (std 0.348 ms against 0.011–0.021 in runs 0–4).
 
-### 10.2 Two corrections to what I wrote earlier
+### 10.2 Two corrections to earlier statements
 
-* **Run 5 is not a filter-bank run.** I called `results/real_gpu_fbcsp/` "filter-bank (by stage profile)" and put its p99 6.5 ms and jitter 0.084 ms in the README as the filter-bank decoder's. The log above shows
+* **Run 5 is not a filter-bank run.** `results/real_gpu_fbcsp/` was called "filter-bank (by stage profile)" and its p99 6.5 ms and jitter 0.084 ms were put in the README as the filter-bank decoder's. The log above shows
   it was the Riemannian decoder. The whole folder (accuracy files and latency files) is that run; `results/real_gpu_fbcsp/README.md` now says so. The filter-bank decoder's accuracy was verified from
   a different, later run (§9.2).
 * **The 3.45 ms median (run 6) is not comparable with run 5's 4.078 ms**: other tool, in-process stream, instrumented calls, polling on.
